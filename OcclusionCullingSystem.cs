@@ -11,6 +11,7 @@ using Colossal.Logging;
 namespace OcclusionCulling
 {
     [UpdateAfter(typeof(Game.Objects.SearchSystem))]
+    [UpdateAfter(typeof(Game.Rendering.PreCullingSystem))]
     public partial class OcclusionCullingSystem : SystemBase
     {
         private static ILog s_log = Mod.log;
@@ -51,18 +52,26 @@ namespace OcclusionCulling
             // Debug-only: bypass search tree and directly set culling flag based on simple distance
             if (DEBUG_SIMPLE_CULLING)
             {
-                var handleDebug = Entities
+                int processed = 0;
+                int setZero = 0;
+                int setOne = 0;
+
+                // Run immediately so we can log reliable counts in the same frame
+                Entities
                     .WithAll<Game.Objects.Static>()
                     .WithName("DebugSimpleCulling")
-                    .ForEach((ref CullingInfo info, in Game.Objects.Transform transform) =>
+                    .ForEach((ref Game.Rendering.CullingInfo info, in Game.Objects.Transform transform) =>
                     {
+                        processed++;
                         float distance = math.distance(transform.m_Position, camPos);
-                        // Within 100m: fail culling; outside: pass culling
-                        info.m_PassedCulling = (byte)(distance < 100f ? 0 : 1);
+                        byte newVal = (byte)(distance < 100f ? 0 : 1);
+                        if (newVal == 0) setZero++; else setOne++;
+                        info.m_PassedCulling = newVal;
                     })
-                    .Schedule(Dependency);
+                    .Run();
 
-                Dependency = handleDebug;
+                s_log.Info($"DebugSimpleCulling: processed={processed}, setZero={setZero}, setOne={setOne}, cam=({camPos.x:F1},{camPos.y:F1},{camPos.z:F1})");
+
                 m_LastCameraPos = camPos;
                 m_LastCameraDir = camDir;
                 return;
@@ -76,7 +85,7 @@ namespace OcclusionCulling
             Dependency = JobHandle.CombineDependencies(Dependency, treeDeps);
 
             // Prepare lookup for writes
-            var lookup = GetComponentLookup<CullingInfo>(false);
+            var lookup = GetComponentLookup<Game.Rendering.CullingInfo>(false);
 
             // Schedule an apply job that runs the occlusion applier (math lives in utilities)
             var job = new ApplyOcclusionJob
