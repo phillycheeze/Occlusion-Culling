@@ -45,7 +45,7 @@ namespace OcclusionCulling
             var objectCenter = (casterBounds.m_Bounds.min + casterBounds.m_Bounds.max) * 0.5f;
             var objectSize = (casterBounds.m_Bounds.max - casterBounds.m_Bounds.min);
 
-            float3 direction = math.normalize(objectCenter - cameraDirection);
+            float3 direction = math.normalize(objectCenter - cameraPosition);
 
             var shadowEnd = objectCenter + (direction * fixedShadowDistance);
 
@@ -96,22 +96,21 @@ namespace OcclusionCulling
             return false;
         }
 
-        /// <summary>
-        /// Apply occlusion directly: sets m_PassedCulling = 0 for occluded entities, leaves others untouched.
-        /// Reuses the exact shadow/distance/bounds math from existing helpers.
-        /// </summary>
-        public static void ApplyOcclusionCulling(
+        // Returns occluded entities without mutating any component data
+        public static NativeList<Entity> FindOccludedEntities(
             NativeQuadTree<Entity, QuadTreeBoundsXZ> quadTree,
             float3 cameraPosition,
             float3 cameraDirection,
-            ComponentLookup<CullingInfo> cullingInfoLookup,
-            float maxProcessingDistance = 1000f)
+            float maxProcessingDistance = 250f,
+            Allocator allocator = Allocator.TempJob)
         {
+            var result = new NativeList<Entity>(allocator);
+
             var shadowCasters = FindShadowCasters(quadTree, cameraPosition);
             if (shadowCasters.Length == 0)
             {
                 shadowCasters.Dispose();
-                return;
+                return result;
             }
 
             var shadowBoxes = new NativeList<QuadTreeBoundsXZ>(shadowCasters.Length, Allocator.Temp);
@@ -122,17 +121,48 @@ namespace OcclusionCulling
                 var caster = shadowCasters[i];
                 var shadowBox = CalculateShadowBox(caster.bounds, cameraPosition, cameraDirection, maxProcessingDistance);
                 var distance = math.distance(cameraPosition, (caster.bounds.m_Bounds.min + caster.bounds.m_Bounds.max) * 0.5f);
-
                 shadowBoxes.Add(shadowBox);
                 casterDistances.Add(distance);
             }
 
-            var applyCollector = new ApplyCollector(shadowBoxes, casterDistances, cameraPosition, cullingInfoLookup, maxProcessingDistance);
-            quadTree.Iterate(ref applyCollector, 0);
+            var collector = new OccludedCollector(result, shadowBoxes, casterDistances, cameraPosition, maxProcessingDistance);
+            quadTree.Iterate(ref collector, 0);
 
             shadowCasters.Dispose();
             shadowBoxes.Dispose();
             casterDistances.Dispose();
+            return result;
+        }
+
+        private struct OccludedCollector : INativeQuadTreeIterator<Entity, QuadTreeBoundsXZ>
+        {
+            public NativeList<Entity> occluded;
+            public NativeList<QuadTreeBoundsXZ> shadowBoxes;
+            public NativeList<float> casterDistances;
+            public float3 cameraPosition;
+            private readonly QuadTreeBoundsXZ searchBounds;
+
+            public OccludedCollector(NativeList<Entity> occluded, NativeList<QuadTreeBoundsXZ> boxes, NativeList<float> distances, float3 camPos, float maxDist)
+            {
+                this.occluded = occluded;
+                shadowBoxes = boxes;
+                casterDistances = distances;
+                cameraPosition = camPos;
+                searchBounds = new QuadTreeBoundsXZ(new Bounds3(camPos - maxDist, camPos + maxDist), BoundsMask.AllLayers, 0);
+            }
+
+            public bool Intersect(QuadTreeBoundsXZ bounds)
+            {
+                return bounds.Intersect(searchBounds);
+            }
+
+            public void Iterate(QuadTreeBoundsXZ bounds, Entity entity)
+            {
+                if (IsObjectOccluded(entity, bounds, shadowBoxes, casterDistances, cameraPosition))
+                {
+                    occluded.Add(entity);
+                }
+            }
         }
 
         /// <summary>
@@ -148,43 +178,6 @@ namespace OcclusionCulling
             // 
             // Reset cache when camera moves > 50m or game loads new area
             // Dramatically reduces per-frame shadow calculation overhead
-        }
-
-        // Collector that writes failed culling only for occluded entities
-        public struct ApplyCollector : INativeQuadTreeIterator<Entity, QuadTreeBoundsXZ>
-        {
-            public NativeList<QuadTreeBoundsXZ> shadowBoxes;
-            public NativeList<float> casterDistances;
-            public float3 cameraPosition;
-            [NativeDisableParallelForRestriction] public ComponentLookup<CullingInfo> cullingInfoLookup;
-            public float maxProcessingDistance;
-            private readonly QuadTreeBoundsXZ searchBounds;
-
-            public ApplyCollector(NativeList<QuadTreeBoundsXZ> shadowBoxes, NativeList<float> casterDistances, float3 cameraPosition, ComponentLookup<CullingInfo> cullingInfoLookup, float maxProcessingDistance)
-            {
-                this.shadowBoxes = shadowBoxes;
-                this.casterDistances = casterDistances;
-                this.cameraPosition = cameraPosition;
-                this.cullingInfoLookup = cullingInfoLookup;
-                this.maxProcessingDistance = maxProcessingDistance;
-                this.searchBounds = new QuadTreeBoundsXZ(new Bounds3(cameraPosition - maxProcessingDistance, cameraPosition + maxProcessingDistance), BoundsMask.AllLayers, 0);
-            }
-
-            public bool Intersect(QuadTreeBoundsXZ bounds)
-            {
-                return bounds.Intersect(searchBounds);
-            }
-
-            public void Iterate(QuadTreeBoundsXZ bounds, Entity entity)
-            {
-                if (!cullingInfoLookup.HasComponent(entity)) return;
-                bool isOccluded = IsObjectOccluded(entity, bounds, shadowBoxes, casterDistances, cameraPosition);
-                if (isOccluded)
-                {
-                    ref var info = ref cullingInfoLookup.GetRefRW(entity).ValueRW;
-                    info.m_PassedCulling = 0;
-                }
-            }
         }
 
         /// <summary>

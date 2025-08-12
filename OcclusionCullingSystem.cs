@@ -59,35 +59,30 @@ namespace OcclusionCulling
                 Dependency = JobHandle.CombineDependencies(Dependency, treeDeps2);
                 Dependency.Complete();
 
-                // Mark occluded using optimized tree culling (sets m_PassedCulling = 0 for occluded)
-                var cullingInfoLookup = GetComponentLookup<CullingInfo>(false);
-                OcclusionUtilities.ApplyOcclusionCulling(staticTree, camPos, camDir, cullingInfoLookup, 250f);
+                // Find occluded entities only (no side-effects)
+                var occluded = OcclusionUtilities.FindOccludedEntities(staticTree, camPos, camDir, 250f, Allocator.TempJob);
 
-                // Enforce occlusion via tree: raise minLod for those flagged as not passed
-                int processed = 0;
+                // Enforce occlusion via tree only for those entities
                 int enforced = 0;
-                Entities
-                    .WithAll<Game.Objects.Static>()
-                    .WithName("DebugEnforceOccludedInTree")
-                    .ForEach((Entity e, ref CullingInfo info) =>
-                    {
-                        processed++;
-                        if (info.m_PassedCulling == 0)
-                        {
-                            var success = staticTree.TryUpdate(
-                                e,
-                                new QuadTreeBoundsXZ(
-                                    info.m_Bounds,
-                                    info.m_Mask,
-                                    byte.MaxValue
-                                )
-                            );
-                            if (success) enforced++;
-                        }
-                    })
-                    .Run();
+                var cullingInfoRO = GetComponentLookup<CullingInfo>(true);
+                for (int i = 0; i < occluded.Length; i++)
+                {
+                    var e = occluded[i];
+                    if (!cullingInfoRO.HasComponent(e)) continue;
+                    var info = cullingInfoRO[e];
+                    var success = staticTree.TryUpdate(
+                        e,
+                        new QuadTreeBoundsXZ(
+                            info.m_Bounds,
+                            info.m_Mask,
+                            byte.MaxValue
+                        )
+                    );
+                    if (success) enforced++;
+                }
+                occluded.Dispose();
 
-                s_log.Info($"DebugOcclusionTreeEnforce: processed={processed}, enforcedMinLod={enforced}, cam=({camPos.x:F1},{camPos.y:F1},{camPos.z:F1})");
+                s_log.Info($"DebugOcclusionTreeEnforce: enforcedMinLod={enforced}, cam=({camPos.x:F1},{camPos.y:F1},{camPos.z:F1})");
 
                 m_LastCameraPos = camPos;
                 m_LastCameraDir = camDir;
