@@ -6,13 +6,11 @@ using Game.Rendering;
 using Unity.Jobs;
 using Colossal.Collections;
 using Game.Common;
-using Game.Objects;
 using Colossal.Logging;
 
 namespace OcclusionCulling
 {
-    [UpdateAfter(typeof(SearchSystem))]
-    [UpdateAfter(typeof(Game.Rendering.PreCullingSystem))]
+    [UpdateAfter(typeof(Game.Objects.SearchSystem))]
     public partial class OcclusionCullingSystem : SystemBase
     {
         private static ILog s_log = Mod.log;
@@ -53,7 +51,7 @@ namespace OcclusionCulling
             // Debug-only: bypass search tree and directly set culling flag based on simple distance
             if (DEBUG_SIMPLE_CULLING)
             {
-                var handle = Entities
+                var handleDebug = Entities
                     .WithAll<Game.Objects.Static>()
                     .WithName("DebugSimpleCulling")
                     .ForEach((ref CullingInfo info, in Game.Objects.Transform transform) =>
@@ -64,14 +62,14 @@ namespace OcclusionCulling
                     })
                     .Schedule(Dependency);
 
-                Dependency = handle;
+                Dependency = handleDebug;
                 m_LastCameraPos = camPos;
                 m_LastCameraDir = camDir;
                 return;
             }
 
             // Get the existing static search tree and wait for its build
-            var searchSystem = World.GetExistingSystemManaged<SearchSystem>();
+            var searchSystem = World.GetExistingSystemManaged<Game.Objects.SearchSystem>();
             var tree = searchSystem.GetStaticSearchTree(readOnly: true, out var treeDeps);
 
             // Chain dependency on the SearchSystem's build job
@@ -105,7 +103,7 @@ namespace OcclusionCulling
             [ReadOnly] public NativeQuadTree<Entity, QuadTreeBoundsXZ> tree;
             [ReadOnly] public float3 cameraPosition;
             [ReadOnly] public float3 cameraDirection;
-            [NativeDisableParallelForRestriction] public ComponentLookup<CullingInfo> cullingInfoLookup;
+            [NativeDisableParallelForRestriction] public ComponentLookup<Game.Rendering.CullingInfo> cullingInfoLookup;
 
             public void Execute()
             {

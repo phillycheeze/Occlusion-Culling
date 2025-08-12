@@ -4,7 +4,7 @@ using Colossal.Collections;
 using Unity.Mathematics;
 using Game.Common;
 using Colossal.Mathematics;
-using Colossal.Logging;
+using Game.Rendering;
 
 namespace OcclusionCulling
 {
