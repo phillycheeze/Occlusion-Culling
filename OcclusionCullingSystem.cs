@@ -7,11 +7,12 @@ using Unity.Jobs;
 using Colossal.Collections;
 using Game.Common;
 using Colossal.Logging;
+using Game.Vehicles;
 
 namespace OcclusionCulling
 {
-    [UpdateAfter(typeof(Game.Objects.SearchSystem))]
-    [UpdateAfter(typeof(Game.Rendering.PreCullingSystem))]
+    //[UpdateAfter(typeof(Game.Objects.SearchSystem))]
+    [UpdateBefore(typeof(Game.Rendering.PreCullingSystem))]
     public partial class OcclusionCullingSystem : SystemBase
     {
         private static ILog s_log = Mod.log;
@@ -52,25 +53,54 @@ namespace OcclusionCulling
             // Debug-only: bypass search tree and directly set culling flag based on simple distance
             if (DEBUG_SIMPLE_CULLING)
             {
+
+                var searchSystem2 = World.GetExistingSystemManaged<Game.Objects.SearchSystem>();
+                JobHandle treeDeps2;
+
+                var staticTree = searchSystem2.GetStaticSearchTree(readOnly: false, out treeDeps2);
+                Dependency = JobHandle.CombineDependencies(Dependency, treeDeps2);
+                Dependency.Complete();
+
+                var cullingInfoRO = GetComponentLookup<CullingInfo>(true);
+
                 int processed = 0;
                 int setZero = 0;
                 int setOne = 0;
+                int wasSuccess = 0;
 
                 // Run immediately so we can log reliable counts in the same frame
                 Entities
                     .WithAll<Game.Objects.Static>()
                     .WithName("DebugSimpleCulling")
-                    .ForEach((ref Game.Rendering.CullingInfo info, in Game.Objects.Transform transform) =>
+                    .ForEach((Entity e, in Game.Objects.Transform transform) =>
                     {
                         processed++;
                         float distance = math.distance(transform.m_Position, camPos);
-                        byte newVal = (byte)(distance < 100f ? 0 : 1);
-                        if (newVal == 0) setZero++; else setOne++;
-                        info.m_PassedCulling = newVal;
+                        byte newVal = (byte)(distance < 50f ? 0 : 1);
+                        if (newVal == 0 && cullingInfoRO.HasComponent(e))
+                        {
+                            setZero++;
+                            var ci = cullingInfoRO[e];
+                            var bounds = ci.m_Bounds;
+                            var success = staticTree.TryUpdate(
+                                e,
+                                new QuadTreeBoundsXZ(
+                                    bounds,
+                                    ci.m_Mask,
+                                    byte.MaxValue
+                                )
+                            );
+                            if (success) wasSuccess++;
+                        }
+                        else
+                        {
+                            setOne++;
+                        }
+                        
                     })
                     .Run();
 
-                s_log.Info($"DebugSimpleCulling: processed={processed}, setZero={setZero}, setOne={setOne}, cam=({camPos.x:F1},{camPos.y:F1},{camPos.z:F1})");
+                s_log.Info($"DebugSimpleCulling: success={wasSuccess}, processed={processed}, setZero={setZero}, setOne={setOne}, cam=({camPos.x:F1},{camPos.y:F1},{camPos.z:F1})");
 
                 m_LastCameraPos = camPos;
                 m_LastCameraDir = camDir;
