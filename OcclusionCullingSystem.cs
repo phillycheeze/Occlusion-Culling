@@ -50,57 +50,44 @@ namespace OcclusionCulling
                 return;
             }
 
-            // Debug-only: bypass search tree and directly set culling flag based on simple distance
+            // Debug-only: use shadow-box occlusion, then enforce via tree minLod so PreCulling hides it
             if (DEBUG_SIMPLE_CULLING)
             {
-
                 var searchSystem2 = World.GetExistingSystemManaged<Game.Objects.SearchSystem>();
                 JobHandle treeDeps2;
-
                 var staticTree = searchSystem2.GetStaticSearchTree(readOnly: false, out treeDeps2);
                 Dependency = JobHandle.CombineDependencies(Dependency, treeDeps2);
                 Dependency.Complete();
 
-                var cullingInfoRO = GetComponentLookup<CullingInfo>(true);
+                // Mark occluded using optimized tree culling (sets m_PassedCulling = 0 for occluded)
+                var cullingInfoLookup = GetComponentLookup<CullingInfo>(false);
+                OcclusionUtilities.ApplyOcclusionCulling(staticTree, camPos, camDir, cullingInfoLookup, 250f);
 
+                // Enforce occlusion via tree: raise minLod for those flagged as not passed
                 int processed = 0;
-                int setZero = 0;
-                int setOne = 0;
-                int wasSuccess = 0;
-
-                // Run immediately so we can log reliable counts in the same frame
+                int enforced = 0;
                 Entities
                     .WithAll<Game.Objects.Static>()
-                    .WithName("DebugSimpleCulling")
-                    .ForEach((Entity e, in Game.Objects.Transform transform) =>
+                    .WithName("DebugEnforceOccludedInTree")
+                    .ForEach((Entity e, ref CullingInfo info) =>
                     {
                         processed++;
-                        float distance = math.distance(transform.m_Position, camPos);
-                        byte newVal = (byte)(distance < 50f ? 0 : 1);
-                        if (newVal == 0 && cullingInfoRO.HasComponent(e))
+                        if (info.m_PassedCulling == 0)
                         {
-                            setZero++;
-                            var ci = cullingInfoRO[e];
-                            var bounds = ci.m_Bounds;
                             var success = staticTree.TryUpdate(
                                 e,
                                 new QuadTreeBoundsXZ(
-                                    bounds,
-                                    ci.m_Mask,
+                                    info.m_Bounds,
+                                    info.m_Mask,
                                     byte.MaxValue
                                 )
                             );
-                            if (success) wasSuccess++;
+                            if (success) enforced++;
                         }
-                        else
-                        {
-                            setOne++;
-                        }
-                        
                     })
                     .Run();
 
-                s_log.Info($"DebugSimpleCulling: success={wasSuccess}, processed={processed}, setZero={setZero}, setOne={setOne}, cam=({camPos.x:F1},{camPos.y:F1},{camPos.z:F1})");
+                s_log.Info($"DebugOcclusionTreeEnforce: processed={processed}, enforcedMinLod={enforced}, cam=({camPos.x:F1},{camPos.y:F1},{camPos.z:F1})");
 
                 m_LastCameraPos = camPos;
                 m_LastCameraDir = camDir;
