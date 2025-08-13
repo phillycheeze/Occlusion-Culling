@@ -27,11 +27,11 @@ namespace OcclusionCulling
             NativeQuadTree<Entity, QuadTreeBoundsXZ> quadTree,
             float3 cameraPosition,
             float3 cameraDirection,
-            float maxDistance = 200f,
+            float maxDistance = 20f,
             float minDot = 0.1f
         )
         {
-            var collector = new ShadowCasterCollector(cameraPosition, cameraDirection, maxDistance, minDot, 5);
+            var collector = new ShadowCasterCollector(cameraPosition, cameraDirection, maxDistance, minDot, 32);
             quadTree.Iterate(ref collector, 0);
             return collector.m_Bounds;
         }
@@ -49,28 +49,27 @@ namespace OcclusionCulling
             float3 cameraDirection,
             float fixedShadowDistance)
         {
-            var objectCenter = (casterBounds.m_Bounds.min + casterBounds.m_Bounds.max) * 0.5f;
-            var objectSize = (casterBounds.m_Bounds.max - casterBounds.m_Bounds.min);
+            var objectCenter = (casterBounds.m_Bounds.min + casterBounds.m_Bounds.max) * 0.5f; // (100f, 500f, 300f)
+            var objectSize = (casterBounds.m_Bounds.max - casterBounds.m_Bounds.min); // (20f, 100f, 50f)
 
-            //float3 direction = math.normalize(objectCenter - cameraPosition);
-            float3 direction = objectCenter - cameraPosition;
-            float dirLen = math.length(direction);
-            direction = dirLen > 1e-3f ? direction / dirLen : new float3(0f, 0f, 1f);
+            // TODO verify this direction makes sense?
+            //float3 direction = math.normalize(objectCenter - cameraPosition); // (0.23, 0.56, -0.11)
+            float3 direction = math.normalize(new float3(cameraDirection.x, 0f, cameraDirection.z));
             
             var shadowEnd = objectCenter + (direction * fixedShadowDistance);
 
             var shadowMin = new float3(
                 math.min(objectCenter.x, shadowEnd.x) - objectSize.x * 0.5f,
-                -1e6f,
+                objectCenter.y,
                 math.min(objectCenter.z, shadowEnd.z) - objectSize.z * 0.5f
             );
             var shadowMax = new float3(
                 math.max(objectCenter.x, shadowEnd.x) + objectSize.x * 0.5f,
-                1e6f,
+                objectCenter.y,
                 math.max(objectCenter.z, shadowEnd.z) + objectSize.z * 0.5f
             );
 
-            var pad = 20f; // Temp to visually see culling happen
+            var pad = 10f; // Temp to visually see culling happen
             shadowMin.x -= pad;
             shadowMin.z -= pad;
             shadowMax.x += pad;
@@ -93,10 +92,11 @@ namespace OcclusionCulling
             QuadTreeBoundsXZ candidateBounds,
             NativeList<QuadTreeBoundsXZ> shadowBoxes,
             NativeList<float> shadowCasterDistances,
-            float3 cameraPosition)
+            float3 cameraPosition,
+            float3 cameraDirection)
         {
             if (shadowBoxes.Length == 0) return false;
-            const float depthBuffer = 30f; // Only consider culling entities past 30m, otherwise it may include itself (TODO: fix this logic)
+            const float depthBuffer = 40f; // Only consider culling entities past 40m, otherwise it may include itself (TODO: fix this logic)
 
             var candidateCenter = (candidateBounds.m_Bounds.min + candidateBounds.m_Bounds.max) * 0.5f;
             var candidateDistance = math.distance(cameraPosition, candidateCenter);
@@ -127,7 +127,7 @@ namespace OcclusionCulling
             var result = new NativeList<(Entity, QuadTreeBoundsXZ)>(allocator);
 
             // Use the same processing radius when finding casters
-            var shadowCasters = FindShadowCasters(quadTree, cameraPosition, cameraDirection, maxProcessingDistance, 0.1f);
+            var shadowCasters = FindShadowCasters(quadTree, cameraPosition, cameraDirection, 20f, 0.1f);
             if (shadowCasters.Length == 0)
             {
                 shadowCasters.Dispose();
@@ -152,10 +152,10 @@ namespace OcclusionCulling
                 var center = (b.min + b.max) * 0.5f;
                 var ext = (b.max - b.min) * 0.5f;
                 var dist = math.distance(new float2(center.x, center.z), new float2(cameraPosition.x, cameraPosition.z));
-                s_log.Info($"Box[{i}] dist={dist:F1} ext=({ext.x:F1},{ext.y:F1},{ext.z:F1})");
+                s_log.Info($"Box[{i}] dist={dist:F1} ext=({ext.x:F1},{ext.y:F1},{ext.z:F1}) center={center}");
             }
 
-            var collector = new OccludedCollector(result, shadowBoxes, casterDistances, cameraPosition, maxProcessingDistance);
+            var collector = new OccludedCollector(result, shadowBoxes, casterDistances, cameraPosition, cameraDirection, maxProcessingDistance);
             quadTree.Iterate(ref collector, 0);
 
             shadowCasters.Dispose();
@@ -170,14 +170,16 @@ namespace OcclusionCulling
             public NativeList<QuadTreeBoundsXZ> shadowBoxes;
             public NativeList<float> casterDistances;
             public float3 cameraPosition;
+            public float3 cameraDirection;
             private readonly QuadTreeBoundsXZ searchBounds;
 
-            public OccludedCollector(NativeList<(Entity, QuadTreeBoundsXZ)> occluded, NativeList<QuadTreeBoundsXZ> boxes, NativeList<float> distances, float3 camPos, float maxDist)
+            public OccludedCollector(NativeList<(Entity, QuadTreeBoundsXZ)> occluded, NativeList<QuadTreeBoundsXZ> boxes, NativeList<float> distances, float3 camPos, float3 camDir, float maxDist)
             {
                 this.occluded = occluded;
                 shadowBoxes = boxes;
                 casterDistances = distances;
                 cameraPosition = camPos;
+                cameraDirection = camDir;
                 searchBounds = new QuadTreeBoundsXZ(new Bounds3(camPos - maxDist, camPos + maxDist), BoundsMask.AllLayers, 0);
             }
 
@@ -188,7 +190,7 @@ namespace OcclusionCulling
 
             public void Iterate(QuadTreeBoundsXZ bounds, Entity entity)
             {
-                if (IsObjectOccluded(entity, bounds, shadowBoxes, casterDistances, cameraPosition))
+                if (IsObjectOccluded(entity, bounds, shadowBoxes, casterDistances, cameraPosition, cameraDirection))
                 {
                     occluded.Add((entity, bounds));
                 }
@@ -234,15 +236,16 @@ namespace OcclusionCulling
                 maxCount = maxShadowCasters;
                 count = 0;
                 m_Bounds = new NativeList<(Entity, QuadTreeBoundsXZ)>(maxShadowCasters, Allocator.Temp);
+
                 searchBounds = new QuadTreeBoundsXZ(new Bounds3(cameraPosition - maxDistance, cameraPosition + maxDistance), BoundsMask.AllLayers, 0);
             }
 
             public bool Intersect(QuadTreeBoundsXZ bounds)
             {
-                if (count >= maxCount)
-                {
-                    return false;
-                }
+                //if (count >= maxCount)
+                //{
+                //    return false;
+                //}
 
                 return bounds.Intersect(searchBounds);
             }
@@ -254,17 +257,23 @@ namespace OcclusionCulling
                 // Skip if not in camera view
                 //float3 center = (bounds.m_Bounds.min + bounds.m_Bounds.max) * 0.5f;
                 //float3 toCenterXZ = new float3(center.x - cameraPosition.x, 0f, center.z - cameraPosition.z);
- 
+
                 //if(math.dot(toCenter, cameraDirection) < minDot)
                 //{
                 //    return;
                 //}
+                float3 center = (bounds.m_Bounds.min + bounds.m_Bounds.max) * 0.5f;
+                float3 toCenterXZ = math.normalize(new float3(center.x - cameraPosition.x, 0f, center.z - cameraPosition.z));
+                if (math.dot(toCenterXZ, cameraDirection) < minDot)
+                {
+                    return;
+                }
 
                 var objectSize = (bounds.m_Bounds.max - bounds.m_Bounds.min);
                 var minDimension = math.min(math.min(objectSize.x, objectSize.y), objectSize.z);
                 var maxDimension = math.max(math.max(objectSize.x, objectSize.y), objectSize.z);
 
-                if(minDimension > 5f && maxDimension > 10f)
+                if(minDimension > 3f && maxDimension > 8f)
                 {
                     m_Bounds.Add((item, bounds));
                     count++;

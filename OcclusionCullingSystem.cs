@@ -12,7 +12,7 @@ using Game.Vehicles;
 namespace OcclusionCulling
 {
     //[UpdateAfter(typeof(Game.Objects.SearchSystem))]
-    [UpdateBefore(typeof(Game.Rendering.PreCullingSystem))]
+    [UpdateAfter(typeof(Game.Rendering.PreCullingSystem))]
     public partial class OcclusionCullingSystem : SystemBase
     {
         private static ILog s_log = Mod.log;
@@ -107,7 +107,6 @@ namespace OcclusionCulling
                         //ci.m_Mask = byte.MinValue;
                     }
                 }
-                
 
                 s_log.Info($"DebugOcclusionTreeEnforce: enforcedMinLod={enforced}, missed={missed}, cam=({camPos.x:F1},{camPos.y:F1},{camPos.z:F1})");
                 
