@@ -49,23 +49,23 @@ namespace OcclusionCulling
             float3 cameraDirection,
             float fixedShadowDistance)
         {
-            var objectCenter = (casterBounds.m_Bounds.min + casterBounds.m_Bounds.max) * 0.5f; // (100f, 500f, 300f)
-            var objectSize = (casterBounds.m_Bounds.max - casterBounds.m_Bounds.min); // (20f, 100f, 50f)
+            var objectCenter = (casterBounds.m_Bounds.min + casterBounds.m_Bounds.max) * 0.5f;
+            var objectSize = (casterBounds.m_Bounds.max - casterBounds.m_Bounds.min);
 
             // TODO verify this direction makes sense?
-            //float3 direction = math.normalize(objectCenter - cameraPosition); // (0.23, 0.56, -0.11)
-            float3 direction = math.normalize(new float3(cameraDirection.x, 0f, cameraDirection.z));
+            float3 toCasterXZ = new float3(objectCenter.x - cameraPosition.x, 0f, objectCenter.z - cameraPosition.z);
+            float3 direction = math.normalizesafe(toCasterXZ, new float3(0f, 0f, 1f));
             
             var shadowEnd = objectCenter + (direction * fixedShadowDistance);
 
             var shadowMin = new float3(
                 math.min(objectCenter.x, shadowEnd.x) - objectSize.x * 0.5f,
-                objectCenter.y,
+                objectCenter.y - 1f, // Should be ignored but add tiny thickness just in case
                 math.min(objectCenter.z, shadowEnd.z) - objectSize.z * 0.5f
             );
             var shadowMax = new float3(
                 math.max(objectCenter.x, shadowEnd.x) + objectSize.x * 0.5f,
-                objectCenter.y,
+                objectCenter.y + 1f,
                 math.max(objectCenter.z, shadowEnd.z) + objectSize.z * 0.5f
             );
 
@@ -230,7 +230,7 @@ namespace OcclusionCulling
             public ShadowCasterCollector(float3 cameraPos, float3 cameraDir, float searchRadius, float mDot, int maxShadowCasters)
             {
                 cameraPosition = cameraPos;
-                cameraDirection = math.normalize(cameraDir);
+                cameraDirection = math.normalizesafe(new float3(cameraDir.x, 0f, cameraDir.z), new float3(0f, 0f, 1f));
                 maxDistance = searchRadius;
                 minDot = mDot;
                 maxCount = maxShadowCasters;
@@ -242,28 +242,15 @@ namespace OcclusionCulling
 
             public bool Intersect(QuadTreeBoundsXZ bounds)
             {
-                //if (count >= maxCount)
-                //{
-                //    return false;
-                //}
-
-                return bounds.Intersect(searchBounds);
+                return count < maxCount &&  bounds.Intersect(searchBounds);
             }
 
             public void Iterate(QuadTreeBoundsXZ bounds, Entity item)
             {
                 if (count >= maxCount) return;
 
-                // Skip if not in camera view
-                //float3 center = (bounds.m_Bounds.min + bounds.m_Bounds.max) * 0.5f;
-                //float3 toCenterXZ = new float3(center.x - cameraPosition.x, 0f, center.z - cameraPosition.z);
-
-                //if(math.dot(toCenter, cameraDirection) < minDot)
-                //{
-                //    return;
-                //}
                 float3 center = (bounds.m_Bounds.min + bounds.m_Bounds.max) * 0.5f;
-                float3 toCenterXZ = math.normalize(new float3(center.x - cameraPosition.x, 0f, center.z - cameraPosition.z));
+                float3 toCenterXZ = math.normalizesafe(new float3(center.x - cameraPosition.x, 0f, center.z - cameraPosition.z), new float3(0f, 0f, 1f));
                 if (math.dot(toCenterXZ, cameraDirection) < minDot)
                 {
                     return;
