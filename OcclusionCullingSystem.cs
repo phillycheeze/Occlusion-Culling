@@ -63,12 +63,19 @@ namespace OcclusionCulling
                 // Find occluded entities only (no side-effects), including their tree bounds/mask
                 var occluded = OcclusionUtilities.FindOccludedEntities(staticTree, camPos, camDir, 250f, Allocator.TempJob);
 
-                for (int i=0; i < math.min(5, occluded.Length); i++)
+                // Compute engine LOD for a few samples to validate gating
+                var renderingSystem = World.GetExistingSystemManaged<Game.Rendering.RenderingSystem>();
+                var batchDataSystem = World.GetExistingSystemManaged<Game.Rendering.BatchDataSystem>();
+                float4 lodParams4 = Game.Rendering.RenderingUtils.CalculateLodParameters(
+                    batchDataSystem.GetLevelOfDetail(renderingSystem.frameLod, m_CameraSystem.activeCameraController),
+                    lodParams
+                );
+                for (int i = 0; i < math.min(5, occluded.Length); i++)
                 {
-                    var (e,b) = occluded[i];
-                    var c = (b.m_Bounds.min + b.m_Bounds.max) * 0.5f;
-                    var d = math.distance(c, camPos);
-                    s_log.Info($"Occluded[{i}] dist={d:F1} mask={(int)b.m_Mask}");
+                    var (e, b) = occluded[i];
+                    float dMin = Game.Rendering.RenderingUtils.CalculateMinDistance(b.m_Bounds, camPos, camDir, lodParams4);
+                    int   lod  = Game.Rendering.RenderingUtils.CalculateLod(dMin * dMin, lodParams4);
+                    s_log.Info($"Occluded[{i}] dMin={dMin:F1} lod={lod} mask={(int)b.m_Mask}");
                 }
 
                 // Enforce occlusion via tree only for those entities, preserving original bounds/mask
@@ -93,7 +100,7 @@ namespace OcclusionCulling
                     {
                         ref var ci = ref cullingInfoRW.GetRefRW(e).ValueRW;
                         ci.m_MinLod = byte.MaxValue;
-                        //ci.m_PassedCulling = 0;
+                        ci.m_PassedCulling = 0;
                     }
                 }
                 occluded.Dispose();
