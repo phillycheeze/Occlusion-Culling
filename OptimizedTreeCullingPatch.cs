@@ -5,12 +5,16 @@ using Unity.Mathematics;
 using Game.Common;
 using Colossal.Mathematics;
 using Game.Rendering;
+using System.Text.RegularExpressions;
+using Colossal.Logging;
 
 namespace OcclusionCulling
 {
     public static class OcclusionUtilities
     {
         // Utility functions for performing shadow-based culling
+
+        private static ILog s_log = Mod.log;
 
         /// <summary>
         /// Efficiently finds nearby, large objects using heirarchal spatial iteration
@@ -22,9 +26,12 @@ namespace OcclusionCulling
         private static NativeList<(Entity entity, QuadTreeBoundsXZ bounds)> FindShadowCasters(
             NativeQuadTree<Entity, QuadTreeBoundsXZ> quadTree,
             float3 cameraPosition,
-            float maxDistance = 200f)
+            float3 cameraDirection,
+            float maxDistance = 200f,
+            float minDot = 0.1f
+        )
         {
-            var collector = new ShadowCasterCollector(cameraPosition, maxDistance, 8);
+            var collector = new ShadowCasterCollector(cameraPosition, cameraDirection, maxDistance, minDot, 16);
             quadTree.Iterate(ref collector, 0);
             return collector.m_Bounds;
         }
@@ -46,8 +53,7 @@ namespace OcclusionCulling
             var objectSize = (casterBounds.m_Bounds.max - casterBounds.m_Bounds.min);
 
             float3 direction = math.normalize(objectCenter - cameraPosition);
-            var pad = 20f;
-
+            
             var shadowEnd = objectCenter + (direction * fixedShadowDistance);
 
             var shadowMin = new float3(
@@ -61,6 +67,7 @@ namespace OcclusionCulling
                 math.max(objectCenter.z, shadowEnd.z) + objectSize.z * 0.5f
             );
 
+            var pad = 20f; // Temp to visually see culling happen
             shadowMin.x -= pad;
             shadowMin.z -= pad;
             shadowMax.x += pad;
@@ -86,7 +93,10 @@ namespace OcclusionCulling
             float3 cameraPosition)
         {
             if (shadowBoxes.Length == 0) return false;
-            const float depthBuffer = 20f;
+
+            s_log.Info($"ShadowBoxes calculated:{shadowBoxes.Length}, sample1:{shadowBoxes[0].m_Bounds}, sample2:{shadowBoxes[1].m_Bounds}");
+
+            const float depthBuffer = 30f; // Only consider culling entities past 30m, otherwise it may include itself (TODO: fix this logic)
 
             var candidateCenter = (candidateBounds.m_Bounds.min + candidateBounds.m_Bounds.max) * 0.5f;
             var candidateDistance = math.distance(cameraPosition, candidateCenter);
@@ -113,7 +123,7 @@ namespace OcclusionCulling
             var result = new NativeList<(Entity, QuadTreeBoundsXZ)>(allocator);
 
             // Use the same processing radius when finding casters
-            var shadowCasters = FindShadowCasters(quadTree, cameraPosition, maxProcessingDistance);
+            var shadowCasters = FindShadowCasters(quadTree, cameraPosition, cameraDirection, 0.1f, maxProcessingDistance);
             if (shadowCasters.Length == 0)
             {
                 shadowCasters.Dispose();
@@ -193,17 +203,21 @@ namespace OcclusionCulling
         public struct ShadowCasterCollector : INativeQuadTreeIterator<Entity, QuadTreeBoundsXZ>
         {
             public float3 cameraPosition;
+            public float3 cameraDirection;
             public float maxDistance;
+            public float minDot;
             public int maxCount;
 
             private int count;
             public NativeList<(Entity, QuadTreeBoundsXZ)> m_Bounds;
             private QuadTreeBoundsXZ searchBounds;
 
-            public ShadowCasterCollector(float3 cameraPos, float searchRadius, int maxShadowCasters)
+            public ShadowCasterCollector(float3 cameraPos, float3 cameraDir, float searchRadius, float mDot, int maxShadowCasters)
             {
                 cameraPosition = cameraPos;
+                cameraDirection = math.normalize(cameraDir);
                 maxDistance = searchRadius;
+                minDot = mDot;
                 maxCount = maxShadowCasters;
                 count = 0;
                 m_Bounds = new NativeList<(Entity, QuadTreeBoundsXZ)>(maxShadowCasters, Allocator.Temp);
@@ -224,11 +238,19 @@ namespace OcclusionCulling
             {
                 if (count >= maxCount) return;
 
+                // Skip if not in camera view
+                float3 center = (bounds.m_Bounds.min + bounds.m_Bounds.max) * 0.5f;
+                float3 toCenter = math.normalize(center - cameraPosition);
+                if(math.dot(toCenter, cameraDirection) < minDot)
+                {
+                    return;
+                }
+
                 var objectSize = (bounds.m_Bounds.max - bounds.m_Bounds.min);
                 var minDimension = math.min(math.min(objectSize.x, objectSize.y), objectSize.z);
                 var maxDimension = math.max(math.max(objectSize.x, objectSize.y), objectSize.z);
 
-                if(maxDimension > 10f)
+                if(minDimension > 5f && maxDimension > 10f)
                 {
                     m_Bounds.Add((item, bounds));
                     count++;

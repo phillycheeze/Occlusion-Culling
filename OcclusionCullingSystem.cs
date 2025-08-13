@@ -51,6 +51,7 @@ namespace OcclusionCulling
             }
 
             // Debug-only: use shadow-box occlusion, then enforce via tree minLod so PreCulling hides it
+            // TODO: move to parallel job, add caching struct, and other optimizations
             if (DEBUG_SIMPLE_CULLING)
             {
                 var searchSystem2 = World.GetExistingSystemManaged<Game.Objects.SearchSystem>();
@@ -61,6 +62,11 @@ namespace OcclusionCulling
 
                 // Find occluded entities only (no side-effects), including their tree bounds/mask
                 var occluded = OcclusionUtilities.FindOccludedEntities(staticTree, camPos, camDir, 250f, Allocator.TempJob);
+
+                if (occluded.Length > 2)
+                {
+                    s_log.Info($"Finished occluding calc; sample1:({occluded[0].entity}, {occluded[0].bounds}); sample2:({occluded[1].entity}, {occluded[1].bounds})");
+                }
 
                 // Enforce occlusion via tree only for those entities, preserving original bounds/mask
                 int enforced = 0;
