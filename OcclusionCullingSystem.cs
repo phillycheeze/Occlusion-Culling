@@ -61,7 +61,7 @@ namespace OcclusionCulling
                 Dependency.Complete();
 
                 // Find occluded entities only (no side-effects), including their tree bounds/mask
-                var occluded = OcclusionUtilities.FindOccludedEntities(staticTree, camPos, camDir, 250f, Allocator.TempJob);
+                var occluded = OcclusionUtilities.FindOccludedEntities(staticTree, camPos, camDir, 1000f, Allocator.TempJob);
 
                 // Compute engine LOD for a few samples to validate gating
                 var renderingSystem = World.GetExistingSystemManaged<Game.Rendering.RenderingSystem>();
@@ -80,6 +80,7 @@ namespace OcclusionCulling
 
                 // Enforce occlusion via tree only for those entities, preserving original bounds/mask
                 int enforced = 0;
+                int missed = 0;
                 var cullingInfoRW = GetComponentLookup<CullingInfo>(false);
                 for (int i = 0; i < occluded.Length; i++)
                 {
@@ -95,19 +96,25 @@ namespace OcclusionCulling
                         )
                     );
                     if (success) enforced++;
+                    else missed++;
 
                     if (cullingInfoRW.HasComponent(e))
                     {
+                        if (i == 0 || i == 2 || i == 10) s_log.Info($"Sampled entity: {e.Index}");
                         ref var ci = ref cullingInfoRW.GetRefRW(e).ValueRW;
                         ci.m_MinLod = byte.MaxValue;
-                        ci.m_PassedCulling = 0;
+                        //ci.m_PassedCulling = 0;
+                        //ci.m_Mask = byte.MinValue;
                     }
                 }
+                
+
+                s_log.Info($"DebugOcclusionTreeEnforce: enforcedMinLod={enforced}, missed={missed}, cam=({camPos.x:F1},{camPos.y:F1},{camPos.z:F1})");
+                
+                searchSystem2.AddStaticSearchTreeWriter(default);
+                World.GetExistingSystemManaged<Game.Rendering.PreCullingSystem>().ResetCulling();
+
                 occluded.Dispose();
-
-                s_log.Info($"DebugOcclusionTreeEnforce: enforcedMinLod={enforced}, cam=({camPos.x:F1},{camPos.y:F1},{camPos.z:F1})");
-
-                searchSystem2.AddStaticSearchTreeWriter(Dependency);
 
                 m_LastCameraPos = camPos;
                 m_LastCameraDir = camDir;
