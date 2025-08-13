@@ -88,48 +88,6 @@ namespace OcclusionCulling
                 m_LastCameraDir = camDir;
                 return;
             }
-
-            // Get the existing static search tree and wait for its build
-            var searchSystem = World.GetExistingSystemManaged<Game.Objects.SearchSystem>();
-            var tree = searchSystem.GetStaticSearchTree(readOnly: true, out var treeDeps);
-
-            // Chain dependency on the SearchSystem's build job
-            Dependency = JobHandle.CombineDependencies(Dependency, treeDeps);
-
-            // Prepare lookup for writes
-            var lookup = GetComponentLookup<Game.Rendering.CullingInfo>(false);
-
-            // Schedule an apply job that runs the occlusion applier (math lives in utilities)
-            var job = new ApplyOcclusionJob
-            {
-                tree = tree,
-                cameraPosition = camPos,
-                cameraDirection = camDir,
-                cullingInfoLookup = lookup
-            };
-            var handle = job.Schedule(Dependency);
-
-            // Register our read with the SearchSystem so future builds wait for us
-            searchSystem.AddStaticSearchTreeReader(handle);
-            Dependency = handle;
-
-            // Cache camera state until next significant move
-            m_LastCameraPos = camPos;
-            m_LastCameraDir = camDir;
-        }
-
-        [BurstCompile]
-        private struct ApplyOcclusionJob : IJob
-        {
-            [ReadOnly] public NativeQuadTree<Entity, QuadTreeBoundsXZ> tree;
-            [ReadOnly] public float3 cameraPosition;
-            [ReadOnly] public float3 cameraDirection;
-            [NativeDisableParallelForRestriction] public ComponentLookup<Game.Rendering.CullingInfo> cullingInfoLookup;
-
-            public void Execute()
-            {
-                OcclusionUtilities.ApplyOcclusionCulling(tree, cameraPosition, cameraDirection, cullingInfoLookup, 1000f);
-            }
         }
     }
 }

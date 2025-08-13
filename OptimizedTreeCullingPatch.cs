@@ -22,7 +22,7 @@ namespace OcclusionCulling
         private static NativeList<(Entity entity, QuadTreeBoundsXZ bounds)> FindShadowCasters(
             NativeQuadTree<Entity, QuadTreeBoundsXZ> quadTree,
             float3 cameraPosition,
-            float maxDistance = 25f)
+            float maxDistance = 200f)
         {
             var collector = new ShadowCasterCollector(cameraPosition, maxDistance, 8);
             quadTree.Iterate(ref collector, 0);
@@ -46,6 +46,7 @@ namespace OcclusionCulling
             var objectSize = (casterBounds.m_Bounds.max - casterBounds.m_Bounds.min);
 
             float3 direction = math.normalize(objectCenter - cameraPosition);
+            var pad = 20f;
 
             var shadowEnd = objectCenter + (direction * fixedShadowDistance);
 
@@ -59,6 +60,11 @@ namespace OcclusionCulling
                 casterBounds.m_Bounds.max.y,
                 math.max(objectCenter.z, shadowEnd.z) + objectSize.z * 0.5f
             );
+
+            shadowMin.x -= pad;
+            shadowMin.z -= pad;
+            shadowMax.x += pad;
+            shadowMax.z += pad;
             return new QuadTreeBoundsXZ(new Bounds3(shadowMin, shadowMax), BoundsMask.AllLayers, 0);
         }
 
@@ -80,7 +86,7 @@ namespace OcclusionCulling
             float3 cameraPosition)
         {
             if (shadowBoxes.Length == 0) return false;
-            const float depthBuffer = 10f;
+            const float depthBuffer = 20f;
 
             var candidateCenter = (candidateBounds.m_Bounds.min + candidateBounds.m_Bounds.max) * 0.5f;
             var candidateDistance = math.distance(cameraPosition, candidateCenter);
@@ -221,7 +227,7 @@ namespace OcclusionCulling
                 var minDimension = math.min(math.min(objectSize.x, objectSize.y), objectSize.z);
                 var maxDimension = math.max(math.max(objectSize.x, objectSize.y), objectSize.z);
 
-                if(maxDimension > 5f && maxDimension > 15f)
+                if(maxDimension > 10f)
                 {
                     m_Bounds.Add((item, bounds));
                     count++;
