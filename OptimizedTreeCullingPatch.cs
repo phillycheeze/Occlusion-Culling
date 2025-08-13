@@ -31,7 +31,7 @@ namespace OcclusionCulling
             float minDot = 0.1f
         )
         {
-            var collector = new ShadowCasterCollector(cameraPosition, cameraDirection, maxDistance, minDot, 16);
+            var collector = new ShadowCasterCollector(cameraPosition, cameraDirection, maxDistance, minDot, 5);
             quadTree.Iterate(ref collector, 0);
             return collector.m_Bounds;
         }
@@ -52,18 +52,21 @@ namespace OcclusionCulling
             var objectCenter = (casterBounds.m_Bounds.min + casterBounds.m_Bounds.max) * 0.5f;
             var objectSize = (casterBounds.m_Bounds.max - casterBounds.m_Bounds.min);
 
-            float3 direction = math.normalize(objectCenter - cameraPosition);
+            //float3 direction = math.normalize(objectCenter - cameraPosition);
+            float3 direction = objectCenter - cameraPosition;
+            float dirLen = math.length(direction);
+            direction = dirLen > 1e-3f ? direction / dirLen : new float3(0f, 0f, 1f);
             
             var shadowEnd = objectCenter + (direction * fixedShadowDistance);
 
             var shadowMin = new float3(
                 math.min(objectCenter.x, shadowEnd.x) - objectSize.x * 0.5f,
-                casterBounds.m_Bounds.min.y,
+                -1e6f,
                 math.min(objectCenter.z, shadowEnd.z) - objectSize.z * 0.5f
             );
             var shadowMax = new float3(
                 math.max(objectCenter.x, shadowEnd.x) + objectSize.x * 0.5f,
-                casterBounds.m_Bounds.max.y,
+                1e6f,
                 math.max(objectCenter.z, shadowEnd.z) + objectSize.z * 0.5f
             );
 
@@ -93,13 +96,14 @@ namespace OcclusionCulling
             float3 cameraPosition)
         {
             if (shadowBoxes.Length == 0) return false;
-
-            s_log.Info($"ShadowBoxes calculated:{shadowBoxes.Length}, sample1:{shadowBoxes[0].m_Bounds}, sample2:{shadowBoxes[1].m_Bounds}");
-
             const float depthBuffer = 30f; // Only consider culling entities past 30m, otherwise it may include itself (TODO: fix this logic)
 
             var candidateCenter = (candidateBounds.m_Bounds.min + candidateBounds.m_Bounds.max) * 0.5f;
             var candidateDistance = math.distance(cameraPosition, candidateCenter);
+            
+            //DEBUGGING
+            //var b1 = shadowBoxes[0].m_Bounds;
+            //s_log.Info($"ShadowBoxes calculated: {shadowBoxes.Length}");
 
             for (int i = 0; i < shadowBoxes.Length; i++)
             {
@@ -123,7 +127,7 @@ namespace OcclusionCulling
             var result = new NativeList<(Entity, QuadTreeBoundsXZ)>(allocator);
 
             // Use the same processing radius when finding casters
-            var shadowCasters = FindShadowCasters(quadTree, cameraPosition, cameraDirection, 0.1f, maxProcessingDistance);
+            var shadowCasters = FindShadowCasters(quadTree, cameraPosition, cameraDirection, maxProcessingDistance, 0.1f);
             if (shadowCasters.Length == 0)
             {
                 shadowCasters.Dispose();
@@ -140,6 +144,15 @@ namespace OcclusionCulling
                 var distance = math.distance(cameraPosition, (caster.bounds.m_Bounds.min + caster.bounds.m_Bounds.max) * 0.5f);
                 shadowBoxes.Add(shadowBox);
                 casterDistances.Add(distance);
+            }
+
+            for (int i = 0; i < math.min(3, shadowBoxes.Length); i++)
+            {
+                var b = shadowBoxes[i].m_Bounds;
+                var center = (b.min + b.max) * 0.5f;
+                var ext = (b.max - b.min) * 0.5f;
+                var dist = math.distance(new float2(center.x, center.z), new float2(cameraPosition.x, cameraPosition.z));
+                s_log.Info($"Box[{i}] dist={dist:F1} ext=({ext.x:F1},{ext.y:F1},{ext.z:F1})");
             }
 
             var collector = new OccludedCollector(result, shadowBoxes, casterDistances, cameraPosition, maxProcessingDistance);
@@ -239,12 +252,13 @@ namespace OcclusionCulling
                 if (count >= maxCount) return;
 
                 // Skip if not in camera view
-                float3 center = (bounds.m_Bounds.min + bounds.m_Bounds.max) * 0.5f;
-                float3 toCenter = math.normalize(center - cameraPosition);
-                if(math.dot(toCenter, cameraDirection) < minDot)
-                {
-                    return;
-                }
+                //float3 center = (bounds.m_Bounds.min + bounds.m_Bounds.max) * 0.5f;
+                //float3 toCenterXZ = new float3(center.x - cameraPosition.x, 0f, center.z - cameraPosition.z);
+ 
+                //if(math.dot(toCenter, cameraDirection) < minDot)
+                //{
+                //    return;
+                //}
 
                 var objectSize = (bounds.m_Bounds.max - bounds.m_Bounds.min);
                 var minDimension = math.min(math.min(objectSize.x, objectSize.y), objectSize.z);
