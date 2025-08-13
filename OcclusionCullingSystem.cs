@@ -59,22 +59,23 @@ namespace OcclusionCulling
                 Dependency = JobHandle.CombineDependencies(Dependency, treeDeps2);
                 Dependency.Complete();
 
-                // Find occluded entities only (no side-effects)
+                // Find occluded entities only (no side-effects), including their tree bounds/mask
                 var occluded = OcclusionUtilities.FindOccludedEntities(staticTree, camPos, camDir, 250f, Allocator.TempJob);
 
-                // Enforce occlusion via tree only for those entities
+                // Enforce occlusion via tree only for those entities, preserving original bounds/mask
                 int enforced = 0;
-                var cullingInfoRO = GetComponentLookup<CullingInfo>(true);
                 for (int i = 0; i < occluded.Length; i++)
                 {
-                    var e = occluded[i];
-                    if (!cullingInfoRO.HasComponent(e)) continue;
-                    var info = cullingInfoRO[e];
+                    var pair = occluded[i];
+                    var e = pair.entity;
+                    var b = pair.bounds;
+                    // Optional safety filter: only trees, skip lots/zones
+                    // if ((b.m_Mask & BoundsMask.IsTree) == 0 || (b.m_Mask & (BoundsMask.HasLot | BoundsMask.OccupyZone)) != 0) continue;
                     var success = staticTree.TryUpdate(
                         e,
                         new QuadTreeBoundsXZ(
-                            info.m_Bounds,
-                            info.m_Mask,
+                            b.m_Bounds,
+                            b.m_Mask,
                             byte.MaxValue
                         )
                     );

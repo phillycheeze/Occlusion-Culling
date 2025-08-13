@@ -102,17 +102,18 @@ namespace OcclusionCulling
             return false;
         }
 
-        // Returns occluded entities without mutating any component data
-        public static NativeList<Entity> FindOccludedEntities(
+        // Returns occluded entities with their tree bounds (no mutations)
+        public static NativeList<(Entity entity, QuadTreeBoundsXZ bounds)> FindOccludedEntities(
             NativeQuadTree<Entity, QuadTreeBoundsXZ> quadTree,
             float3 cameraPosition,
             float3 cameraDirection,
             float maxProcessingDistance = 250f,
             Allocator allocator = Allocator.TempJob)
         {
-            var result = new NativeList<Entity>(allocator);
+            var result = new NativeList<(Entity, QuadTreeBoundsXZ)>(allocator);
 
-            var shadowCasters = FindShadowCasters(quadTree, cameraPosition);
+            // Use the same processing radius when finding casters
+            var shadowCasters = FindShadowCasters(quadTree, cameraPosition, maxProcessingDistance);
             if (shadowCasters.Length == 0)
             {
                 shadowCasters.Dispose();
@@ -142,13 +143,13 @@ namespace OcclusionCulling
 
         private struct OccludedCollector : INativeQuadTreeIterator<Entity, QuadTreeBoundsXZ>
         {
-            public NativeList<Entity> occluded;
+            public NativeList<(Entity, QuadTreeBoundsXZ)> occluded;
             public NativeList<QuadTreeBoundsXZ> shadowBoxes;
             public NativeList<float> casterDistances;
             public float3 cameraPosition;
             private readonly QuadTreeBoundsXZ searchBounds;
 
-            public OccludedCollector(NativeList<Entity> occluded, NativeList<QuadTreeBoundsXZ> boxes, NativeList<float> distances, float3 camPos, float maxDist)
+            public OccludedCollector(NativeList<(Entity, QuadTreeBoundsXZ)> occluded, NativeList<QuadTreeBoundsXZ> boxes, NativeList<float> distances, float3 camPos, float maxDist)
             {
                 this.occluded = occluded;
                 shadowBoxes = boxes;
@@ -166,7 +167,7 @@ namespace OcclusionCulling
             {
                 if (IsObjectOccluded(entity, bounds, shadowBoxes, casterDistances, cameraPosition))
                 {
-                    occluded.Add(entity);
+                    occluded.Add((entity, bounds));
                 }
             }
         }
