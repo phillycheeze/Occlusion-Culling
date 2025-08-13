@@ -93,7 +93,7 @@ namespace OcclusionCulling
                     {
                         ref var ci = ref cullingInfoRW.GetRefRW(e).ValueRW;
                         ci.m_MinLod = byte.MaxValue;
-                        ci.m_PassedCulling = 0;
+                        //ci.m_PassedCulling = 0;
                     }
                 }
                 occluded.Dispose();
