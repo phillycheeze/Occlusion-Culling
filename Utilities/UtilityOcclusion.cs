@@ -93,6 +93,78 @@ namespace OcclusionCulling
                 return result;
             }
 
+		// Minimal terrain LOS occlusion test (POC). No jobs; coarse sampling; main-thread friendly for quick validation.
+		// For each candidate, it samples terrain heights along the line from camera to object center and checks if
+		// terrain rises above the line-of-sight to the object's top. If so, it's considered terrain-occluded.
+		public static NativeList<(Entity entity, QuadTreeBoundsXZ bounds)> FindTerrainOccludedEntities(
+			NativeQuadTree<Entity, QuadTreeBoundsXZ> quadTree,
+			TerrainHeightData terrainHeight,
+			float3 cameraPosition,
+			float3 cameraDirection,
+			float maxProcessingDistance = 600f,
+			int samplesPerRay = 12,
+			float clearanceMeters = 0.5f,
+			Allocator allocator = Allocator.TempJob)
+		{
+			var result = new NativeList<(Entity, QuadTreeBoundsXZ)>(allocator);
+
+			// Reuse existing collector to get a small set of forward-facing candidates within radius
+			var collector = new CandidateAndShadowCasterCollector(
+				cameraPosition,
+				cameraDirection,
+				maxProcessingDistance,
+				0.1f,
+				32
+			);
+			quadTree.Iterate(ref collector, 0);
+
+			for (int i = 0; i < collector.candidates.Length; i++)
+			{
+				var (entity, bounds) = collector.candidates[i];
+				float3 center = (bounds.m_Bounds.min + bounds.m_Bounds.max) * 0.5f;
+				float2 toXZ = new float2(center.x - cameraPosition.x, center.z - cameraPosition.z);
+				float distXZ = math.length(toXZ);
+				if (distXZ < 1f || distXZ > maxProcessingDistance)
+					continue;
+
+				// Use the object's top as a conservative visibility target
+				float targetY = bounds.m_Bounds.max.y;
+				float2 dirXZ = toXZ / distXZ;
+
+				bool occludedByTerrain = false;
+				int steps = math.max(2, samplesPerRay);
+				for (int s = 1; s < steps; s++)
+				{
+					float r = (distXZ * s) / steps;
+					float2 sampleXZ = new float2(cameraPosition.x, cameraPosition.z) + dirXZ * r;
+
+					// Sample terrain height using a tiny bounds at this XZ
+					var sampleBounds = new Bounds3(
+						new float3(sampleXZ.x - 0.5f, -10000f, sampleXZ.y - 0.5f),
+						new float3(sampleXZ.x + 0.5f,  10000f, sampleXZ.y + 0.5f)
+					);
+					float terrainY = TerrainUtils.GetHeightRange(ref terrainHeight, sampleBounds).max;
+
+					// Expected LOS height at distance r (towards the object's top)
+					float losY = math.lerp(cameraPosition.y, targetY, r / distXZ);
+
+					if (terrainY > (losY - clearanceMeters))
+					{
+						occludedByTerrain = true;
+						break;
+					}
+				}
+
+				if (occludedByTerrain)
+				{
+					result.Add((entity, bounds));
+				}
+			}
+
+			collector.Dispose();
+			return result;
+		}
+
             var shadowBoxes = new NativeList<QuadTreeBoundsXZ>(collector.casters.Length, Allocator.Temp);
             var casterDistances = new NativeList<float>(collector.casters.Length, Allocator.Temp);
             for (int i = 0; i < collector.casters.Length; i++)

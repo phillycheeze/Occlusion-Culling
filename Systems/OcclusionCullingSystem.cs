@@ -72,6 +72,33 @@ namespace OcclusionCulling
 
                 var occluded = OcclusionUtilities.FindOccludedEntities(staticTreeRO, camPos, camDir, 1000f, Allocator.TempJob);
 
+                // TESTING ONLY RIGHT NOW
+                var terrainSystem = World.GetExistingSystemManaged<TerrainSystem>();
+                var terrainData = terrainSystem.GetHeightData();
+
+                var terrainOccluded = OcclusionUtilities.FindTerrainOccludedEntities(
+                    staticTreeRO,
+                    terrainData,
+                    camPos,
+                    camDir,
+                    600f,           // max distance to check
+                    12,             // samples per ray
+                    0.5f,           // clearance meters
+                    Allocator.TempJob
+                );
+
+                // Union with your existing occluded list
+                for (int i = 0; i < terrainOccluded.Length; i++) {
+                    var pair = terrainOccluded[i];
+                    // avoid duplicates; optional small set or hash check
+                    bool exists = false;
+                    for (int j = 0; j < occluded.Length; j++) {
+                        if (occluded[j].entity == pair.entity) { exists = true; break; }
+                    }
+                    if (!exists) occluded.Add(pair);
+                }
+
+
                 // Build delta sets on main thread
                 var currentOccluded = new NativeParallelHashSet<Entity>(occluded.Length, Allocator.TempJob);
                 var toEnforce = new NativeList<(Entity, QuadTreeBoundsXZ)>(Allocator.TempJob);
