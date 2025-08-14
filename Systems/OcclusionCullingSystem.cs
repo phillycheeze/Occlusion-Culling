@@ -55,8 +55,7 @@ namespace OcclusionCulling
             float3 camPos = lodParams.cameraPosition;
             float3 camDir = m_CameraSystem.activeViewer.forward;
             float2 dXZ = new float2(camPos.x - m_LastCameraPos.x, camPos.z - m_LastCameraPos.z);
-            // Compare squared distance to avoid sqrt since sqrt is expensive
-            bool moved = math.lengthsq(dXZ) > (kMoveThreshold * kMoveThreshold);
+            bool moved = math.length(dXZ) > kMoveThreshold;
 
             if (!moved)
             {
@@ -131,6 +130,8 @@ namespace OcclusionCulling
             return;
         }
 
+        private float3 m_LastDirXZ;
+
         private struct ApplyOcclusionDeltaJob : IJob
         {
             public NativeQuadTree<Entity, QuadTreeBoundsXZ> tree;
@@ -167,3 +168,5 @@ namespace OcclusionCulling
         }
     }
 }
+
+
