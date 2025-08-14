@@ -55,7 +55,8 @@ namespace OcclusionCulling
             float3 camPos = lodParams.cameraPosition;
             float3 camDir = m_CameraSystem.activeViewer.forward;
             float2 dXZ = new float2(camPos.x - m_LastCameraPos.x, camPos.z - m_LastCameraPos.z);
-            bool moved = math.length(dXZ) > kMoveThreshold;
+            // Compare squared distance to avoid sqrt since sqrt is expensive
+            bool moved = math.lengthsq(dXZ) > (kMoveThreshold * kMoveThreshold);
 
             if (!moved)
             {
@@ -74,14 +75,10 @@ namespace OcclusionCulling
 
                 // Build delta sets on main thread
                 var currentOccluded = new NativeParallelHashSet<Entity>(occluded.Length, Allocator.TempJob);
-                for (int i = 0; i < occluded.Length; i++)
-                {
-                    currentOccluded.Add(occluded[i].entity);
-                }
-
                 var toEnforce = new NativeList<(Entity, QuadTreeBoundsXZ)>(Allocator.TempJob);
                 for (int i = 0; i < occluded.Length; i++)
                 {
+                    currentOccluded.Add(occluded[i].entity);
                     var (e,b) = occluded[i];
                     if (!m_EnforcedEntities.Contains(e))
                     {

@@ -17,26 +17,6 @@ namespace OcclusionCulling
         private static ILog s_log = Mod.log;
 
         /// <summary>
-        /// Efficiently finds nearby, large objects using heirarchal spatial iteration
-        /// </summary>
-        /// <param name="quadTree">The static object search tree</param>
-        /// <param name="cameraPosition">Current camera world position</param>
-        /// <param name="maxDistance">Maximum distance to consider objects (200-500m)</param>
-        /// <returns>Very small list of the largest shadow caster candidates</returns>
-        private static NativeList<(Entity entity, QuadTreeBoundsXZ bounds)> FindShadowCasters(
-            NativeQuadTree<Entity, QuadTreeBoundsXZ> quadTree,
-            float3 cameraPosition,
-            float3 cameraDirection,
-            float maxDistance = 20f,
-            float minDot = 0.1f
-        )
-        {
-            var collector = new ShadowCasterCollector(cameraPosition, cameraDirection, maxDistance, minDot, 32);
-            quadTree.Iterate(ref collector, 0);
-            return collector.m_Bounds;
-        }
-
-        /// <summary>
         /// Shadow box calculaton behind nearby objects
         /// </summary>
         /// <param name="casterBounds">The bounds of the object casting the shadow</param>
@@ -112,75 +92,55 @@ namespace OcclusionCulling
             return false;
         }
 
-        /// <summary>
-        /// Simple cache for shadow data to avoid recalculating every frame
-        /// </summary>
-        private static class ShadowCache
+        // Returns occluded entities with their tree bounds (no mutations). Single traversal + post-filter.
+        public static NativeList<(Entity entity, QuadTreeBoundsXZ bounds)> FindOccludedEntities(
+            NativeQuadTree<Entity, QuadTreeBoundsXZ> quadTree,
+            float3 cameraPosition,
+            float3 cameraDirection,
+            float maxProcessingDistance = 250f,
+            Allocator allocator = Allocator.TempJob)
         {
-            // Cache shadow boxes for multiple frames when camera movement is minimal
-            // public static int lastFrameCalculated = -1;
-            // public static float3 lastCameraPosition;
-            // public static NativeList<Bounds3> cachedShadowBoxes;
-            // public static NativeList<float> cachedCasterDistances;
-            // 
-            // Reset cache when camera moves > 50m or game loads new area
-            // Dramatically reduces per-frame shadow calculation overhead
-        }
+            var result = new NativeList<(Entity, QuadTreeBoundsXZ)>(allocator);
 
-        /// <summary>
-        /// Minimal iterator to find the first entity for testing
-        /// </summary>
-        public struct ShadowCasterCollector : INativeQuadTreeIterator<Entity, QuadTreeBoundsXZ>
-        {
-            public float3 cameraPosition;
-            public float3 cameraDirection;
-            public float maxDistance;
-            public float minDot;
-            public int maxCount;
+            var collector = new CandidateAndShadowCasterCollector(
+                cameraPosition,
+                cameraDirection,
+                maxProcessingDistance,
+                0.1f,
+                32
+            );
+            quadTree.Iterate(ref collector, 0);
 
-            private int count;
-            public NativeList<(Entity, QuadTreeBoundsXZ)> m_Bounds;
-            private QuadTreeBoundsXZ searchBounds;
-
-            public ShadowCasterCollector(float3 cameraPos, float3 cameraDir, float searchRadius, float mDot, int maxShadowCasters)
+            if (collector.casters.Length == 0)
             {
-                cameraPosition = cameraPos;
-                cameraDirection = math.normalizesafe(new float3(cameraDir.x, 0f, cameraDir.z), new float3(0f, 0f, 1f));
-                maxDistance = searchRadius;
-                minDot = mDot;
-                maxCount = maxShadowCasters;
-                count = 0;
-                m_Bounds = new NativeList<(Entity, QuadTreeBoundsXZ)>(maxShadowCasters, Allocator.Temp);
-
-                searchBounds = new QuadTreeBoundsXZ(new Bounds3(cameraPosition - maxDistance, cameraPosition + maxDistance), BoundsMask.AllLayers, 0);
+                collector.Dispose();
+                return result;
             }
 
-            public bool Intersect(QuadTreeBoundsXZ bounds)
+            var shadowBoxes = new NativeList<QuadTreeBoundsXZ>(collector.casters.Length, Allocator.Temp);
+            var casterDistances = new NativeList<float>(collector.casters.Length, Allocator.Temp);
+            for (int i = 0; i < collector.casters.Length; i++)
             {
-                return count < maxCount &&  bounds.Intersect(searchBounds);
+                var caster = collector.casters[i];
+                var shadowBox = CalculateShadowBox(caster.bounds, cameraPosition, cameraDirection, maxProcessingDistance);
+                var distance = math.distance(cameraPosition, (caster.bounds.m_Bounds.min + caster.bounds.m_Bounds.max) * 0.5f);
+                shadowBoxes.Add(shadowBox);
+                casterDistances.Add(distance);
             }
 
-            public void Iterate(QuadTreeBoundsXZ bounds, Entity item)
+            for (int i = 0; i < collector.candidates.Length; i++)
             {
-                if (count >= maxCount) return;
-
-                float3 center = (bounds.m_Bounds.min + bounds.m_Bounds.max) * 0.5f;
-                float3 toCenterXZ = math.normalizesafe(new float3(center.x - cameraPosition.x, 0f, center.z - cameraPosition.z), new float3(0f, 0f, 1f));
-                if (math.dot(toCenterXZ, cameraDirection) < minDot)
+                var (entity, bounds) = collector.candidates[i];
+                if (IsObjectOccluded(entity, bounds, shadowBoxes, casterDistances, cameraPosition, cameraDirection))
                 {
-                    return;
-                }
-
-                var objectSize = (bounds.m_Bounds.max - bounds.m_Bounds.min);
-                var minDimension = math.min(math.min(objectSize.x, objectSize.y), objectSize.z);
-                var maxDimension = math.max(math.max(objectSize.x, objectSize.y), objectSize.z);
-
-                if(minDimension > 3f && maxDimension > 8f)
-                {
-                    m_Bounds.Add((item, bounds));
-                    count++;
+                    result.Add((entity, bounds));
                 }
             }
+
+            shadowBoxes.Dispose();
+            casterDistances.Dispose();
+            collector.Dispose();
+            return result;
         }
 
         /// <summary>
