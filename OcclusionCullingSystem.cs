@@ -15,13 +15,11 @@ namespace OcclusionCulling
     public partial class OcclusionCullingSystem : SystemBase
     {
         private static ILog s_log = Mod.log;
-        static readonly float kMoveThresholdSq = 4f; // 2 m
-        static readonly float kCosRotThreshold = math.cos(math.radians(1f));
+        static readonly float kMoveThreshold= 1f;
         private CameraUpdateSystem m_CameraSystem;
         private Game.Rendering.PreCullingSystem m_PreCullingSystem;
         private Game.Objects.SearchSystem m_SearchSystem;
         private float3 m_LastCameraPos;
-        private float3 m_LastDirXZ; // keep normalized XZ direction
         private const bool DEBUG_SIMPLE_CULLING = true;
         // Cache of entities enforced and their original bounds for restore
         private NativeParallelHashSet<Entity> m_EnforcedEntities;
@@ -57,15 +55,11 @@ namespace OcclusionCulling
             float3 camPos = lodParams.cameraPosition;
             float3 camDir = m_CameraSystem.activeViewer.forward;
             float2 dXZ = new float2(camPos.x - m_LastCameraPos.x, camPos.z - m_LastCameraPos.z);
-            bool moved = math.lengthsq(dXZ) > kMoveThresholdSq;
+            bool moved = math.length(dXZ) > kMoveThreshold;
 
             if (!moved)
             {
-                float3 dirXZ = math.normalizesafe(new float3(camDir.x, 0f, camDir.z));
-                // If first run (uninitialized), treat as moved
-                bool uninit = math.lengthsq(new float2(m_LastDirXZ.x, m_LastDirXZ.z)) < 1e-6f;
-                bool rotated = uninit || math.dot(dirXZ, m_LastDirXZ) < kCosRotThreshold;
-                if (!rotated) return;
+                return;
             }
 
             // TODO: move to parallel job, add caching struct, and other optimizations
