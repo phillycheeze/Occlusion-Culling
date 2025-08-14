@@ -100,10 +100,6 @@ namespace OcclusionCulling
 
             var candidateCenter = (candidateBounds.m_Bounds.min + candidateBounds.m_Bounds.max) * 0.5f;
             var candidateDistance = math.distance(cameraPosition, candidateCenter);
-            
-            //DEBUGGING
-            //var b1 = shadowBoxes[0].m_Bounds;
-            //s_log.Info($"ShadowBoxes calculated: {shadowBoxes.Length}");
 
             for (int i = 0; i < shadowBoxes.Length; i++)
             {
@@ -114,87 +110,6 @@ namespace OcclusionCulling
                 if (candidateBounds.Intersect(shadowBox)) return true;
             }
             return false;
-        }
-
-        // Returns occluded entities with their tree bounds (no mutations)
-        public static NativeList<(Entity entity, QuadTreeBoundsXZ bounds)> FindOccludedEntities(
-            NativeQuadTree<Entity, QuadTreeBoundsXZ> quadTree,
-            float3 cameraPosition,
-            float3 cameraDirection,
-            float maxProcessingDistance = 250f,
-            Allocator allocator = Allocator.TempJob)
-        {
-            var result = new NativeList<(Entity, QuadTreeBoundsXZ)>(allocator);
-
-            // Use the same processing radius when finding casters
-            var shadowCasters = FindShadowCasters(quadTree, cameraPosition, cameraDirection, 20f, 0.1f);
-            if (shadowCasters.Length == 0)
-            {
-                shadowCasters.Dispose();
-                return result;
-            }
-
-            var shadowBoxes = new NativeList<QuadTreeBoundsXZ>(shadowCasters.Length, Allocator.Temp);
-            var casterDistances = new NativeList<float>(shadowCasters.Length, Allocator.Temp);
-
-            for (int i = 0; i < shadowCasters.Length; i++)
-            {
-                var caster = shadowCasters[i];
-                var shadowBox = CalculateShadowBox(caster.bounds, cameraPosition, cameraDirection, maxProcessingDistance);
-                var distance = math.distance(cameraPosition, (caster.bounds.m_Bounds.min + caster.bounds.m_Bounds.max) * 0.5f);
-                shadowBoxes.Add(shadowBox);
-                casterDistances.Add(distance);
-            }
-
-            for (int i = 0; i < math.min(3, shadowBoxes.Length); i++)
-            {
-                var b = shadowBoxes[i].m_Bounds;
-                var center = (b.min + b.max) * 0.5f;
-                var ext = (b.max - b.min) * 0.5f;
-                var dist = math.distance(new float2(center.x, center.z), new float2(cameraPosition.x, cameraPosition.z));
-                s_log.Info($"Box[{i}] dist={dist:F1} ext=({ext.x:F1},{ext.y:F1},{ext.z:F1}) center={center}");
-            }
-
-            var collector = new OccludedCollector(result, shadowBoxes, casterDistances, cameraPosition, cameraDirection, maxProcessingDistance);
-            quadTree.Iterate(ref collector, 0);
-
-            shadowCasters.Dispose();
-            shadowBoxes.Dispose();
-            casterDistances.Dispose();
-            return result;
-        }
-
-        private struct OccludedCollector : INativeQuadTreeIterator<Entity, QuadTreeBoundsXZ>
-        {
-            public NativeList<(Entity, QuadTreeBoundsXZ)> occluded;
-            public NativeList<QuadTreeBoundsXZ> shadowBoxes;
-            public NativeList<float> casterDistances;
-            public float3 cameraPosition;
-            public float3 cameraDirection;
-            private readonly QuadTreeBoundsXZ searchBounds;
-
-            public OccludedCollector(NativeList<(Entity, QuadTreeBoundsXZ)> occluded, NativeList<QuadTreeBoundsXZ> boxes, NativeList<float> distances, float3 camPos, float3 camDir, float maxDist)
-            {
-                this.occluded = occluded;
-                shadowBoxes = boxes;
-                casterDistances = distances;
-                cameraPosition = camPos;
-                cameraDirection = camDir;
-                searchBounds = new QuadTreeBoundsXZ(new Bounds3(camPos - maxDist, camPos + maxDist), BoundsMask.AllLayers, 0);
-            }
-
-            public bool Intersect(QuadTreeBoundsXZ bounds)
-            {
-                return bounds.Intersect(searchBounds);
-            }
-
-            public void Iterate(QuadTreeBoundsXZ bounds, Entity entity)
-            {
-                if (IsObjectOccluded(entity, bounds, shadowBoxes, casterDistances, cameraPosition, cameraDirection))
-                {
-                    occluded.Add((entity, bounds));
-                }
-            }
         }
 
         /// <summary>
@@ -265,6 +180,71 @@ namespace OcclusionCulling
                     m_Bounds.Add((item, bounds));
                     count++;
                 }
+            }
+        }
+
+        /// <summary>
+        /// Single-pass collector that gathers both candidate entities and a capped set of shadow casters.
+        /// This avoids a second quad tree traversal.
+        /// </summary>
+        public struct CandidateAndShadowCasterCollector : INativeQuadTreeIterator<Entity, QuadTreeBoundsXZ>
+        {
+            public float3 cameraPosition;
+            public float3 cameraDirectionXZ;
+            public float maxDistance;
+            public float minDot;
+            public int maxCasterCount;
+
+            private int casterCount;
+            public NativeList<(Entity, QuadTreeBoundsXZ)> candidates;
+            public NativeList<(Entity, QuadTreeBoundsXZ)> casters;
+            private QuadTreeBoundsXZ searchBounds;
+
+            public CandidateAndShadowCasterCollector(float3 cameraPos, float3 cameraDir, float searchRadius, float mDot, int maxShadowCasters)
+            {
+                cameraPosition = cameraPos;
+                cameraDirectionXZ = math.normalizesafe(new float3(cameraDir.x, 0f, cameraDir.z), new float3(0f, 0f, 1f));
+                maxDistance = searchRadius;
+                minDot = mDot;
+                maxCasterCount = maxShadowCasters;
+                casterCount = 0;
+                candidates = new NativeList<(Entity, QuadTreeBoundsXZ)>(Allocator.Temp);
+                casters = new NativeList<(Entity, QuadTreeBoundsXZ)>(maxShadowCasters, Allocator.Temp);
+                searchBounds = new QuadTreeBoundsXZ(new Bounds3(cameraPosition - maxDistance, cameraPosition + maxDistance), BoundsMask.AllLayers, 0);
+            }
+
+            public bool Intersect(QuadTreeBoundsXZ bounds)
+            {
+                // Always traverse to collect all candidates within range
+                return bounds.Intersect(searchBounds);
+            }
+
+            public void Iterate(QuadTreeBoundsXZ bounds, Entity item)
+            {
+                // Collect as candidate for post-pass occlusion testing
+                candidates.Add((item, bounds));
+
+                // Optionally collect as caster if it meets direction/size and we haven't reached the cap
+                if (casterCount >= maxCasterCount) return;
+
+                float3 center = (bounds.m_Bounds.min + bounds.m_Bounds.max) * 0.5f;
+                float3 toCenterXZ = math.normalizesafe(new float3(center.x - cameraPosition.x, 0f, center.z - cameraPosition.z), new float3(0f, 0f, 1f));
+                if (math.dot(toCenterXZ, cameraDirectionXZ) < minDot) return;
+
+                var objectSize = (bounds.m_Bounds.max - bounds.m_Bounds.min);
+                var minDimension = math.min(math.min(objectSize.x, objectSize.y), objectSize.z);
+                var maxDimension = math.max(math.max(objectSize.x, objectSize.y), objectSize.z);
+                if (minDimension > 3f && maxDimension > 8f)
+                {
+                    casters.Add((item, bounds));
+                    casterCount++;
+                }
+            }
+
+            public void Dispose()
+            {
+                if (candidates.IsCreated) candidates.Dispose();
+                if (casters.IsCreated) casters.Dispose();
             }
         }
     }
