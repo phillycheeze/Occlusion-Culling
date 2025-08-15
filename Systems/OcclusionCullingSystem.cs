@@ -7,11 +7,11 @@ using Unity.Jobs;
 using Colossal.Collections;
 using Game.Common;
 using Colossal.Logging;
+using Game.Simulation;
 
 namespace OcclusionCulling
 {
-    //[UpdateAfter(typeof(Game.Objects.SearchSystem))]
-    [UpdateBefore(typeof(Game.Rendering.PreCullingSystem))]
+    [UpdateAfter(typeof(Game.Rendering.PreCullingSystem))]
     public partial class OcclusionCullingSystem : SystemBase
     {
         private static ILog s_log = Mod.log;
@@ -19,9 +19,9 @@ namespace OcclusionCulling
         private CameraUpdateSystem m_CameraSystem;
         private Game.Rendering.PreCullingSystem m_PreCullingSystem;
         private Game.Objects.SearchSystem m_SearchSystem;
+        private Game.Terrain.TerrainSystem m_TerrainSystem;
         private float3 m_LastCameraPos;
-        private const bool DEBUG_SIMPLE_CULLING = true;
-        // Cache of entities enforced and their original bounds for restore
+        private float3 m_LastDirXZ;
         private NativeParallelHashSet<Entity> m_EnforcedEntities;
         private NativeParallelHashMap<Entity, QuadTreeBoundsXZ> m_OriginalByEntity;
 
@@ -31,6 +31,7 @@ namespace OcclusionCulling
             m_CameraSystem = World.GetExistingSystemManaged<CameraUpdateSystem>();
             m_PreCullingSystem = World.GetExistingSystemManaged<Game.Rendering.PreCullingSystem>();
             m_SearchSystem = World.GetExistingSystemManaged<Game.Objects.SearchSystem>();
+            m_TerrainSystem = World.GetExistingSystemManaged<Game.Terrain.TerrainSystem>();
             m_LastCameraPos = float3.zero;
             m_LastDirXZ = float3.zero;
             m_EnforcedEntities = new NativeParallelHashSet<Entity>(1024, Allocator.Persistent);
@@ -54,142 +55,130 @@ namespace OcclusionCulling
 
             float3 camPos = lodParams.cameraPosition;
             float3 camDir = m_CameraSystem.activeViewer.forward;
-            float2 dXZ = new float2(camPos.x - m_LastCameraPos.x, camPos.z - m_LastCameraPos.z);
-            bool moved = math.length(dXZ) > kMoveThreshold;
-
-            if (!moved)
+            // Tech: determine if camera moved, turned, or is looking straight down to skip heavy culling
+            // User: if you hardly move/turn or look straight down, skip shadow checks
+            float2 deltaXZ = new float2(camPos.x - m_LastCameraPos.x, camPos.z - m_LastCameraPos.z);
+            bool moved = math.length(deltaXZ) > kMoveThreshold;
+            float2 currentDirXZ = math.normalize(new float2(camDir.x, camDir.z));
+            bool turned = math.dot(currentDirXZ, m_LastDirXZ) < 0.996f; // threshold ~5° turn
+            bool lookingDown = camDir.y < -0.9f;
+            if ((!moved && !turned) || lookingDown)
             {
                 return;
             }
 
-            // TODO: move to parallel job, add caching struct, and other optimizations
             // TODO: only have utility find XX max culling entities this frame
-            if (DEBUG_SIMPLE_CULLING)
+            JobHandle readDeps;
+            var staticTreeRO = m_SearchSystem.GetStaticSearchTree(readOnly: true, out readDeps);
+            Dependency = JobHandle.CombineDependencies(Dependency, readDeps);
+
+            var terrainData = m_TerrainSystem.GetHeightData();
+
+            // Many calculations on the main thread, not ideal
+            var occluded = OcclusionUtilities.FindTerrainOccludedEntities(
+                staticTreeRO,
+                terrainData,
+                camPos,
+                camDir,
+                1000f,           // max distance to check
+                12,             // samples per ray
+                0.5f,           // clearance meters
+                Allocator.TempJob
+            );
+
+            // Tech: let the apply-delta job do both revert and enforce in one pass
+            // User: we’ll handle hiding and revealing all objects in the job itself
+
+            // Schedule writer job to apply delta and update caches
+            var cullingData = m_PreCullingSystem.GetCullingData(readOnly: false, out var writeDeps);
+            var deltaJob = new ApplyOcclusionDeltaJob
             {
-                JobHandle readDeps;
-                var staticTreeRO = m_SearchSystem.GetStaticSearchTree(readOnly: true, out readDeps);
-                Dependency = JobHandle.CombineDependencies(Dependency, readDeps);
+                cullingData   = cullingData,
+                occludedList  = occluded,
+                enforced      = m_EnforcedEntities,
+                originals     = m_OriginalByEntity
+            };
+            var combined = JobHandle.CombineDependencies(Dependency, writeDeps);
+            var handle = deltaJob.Schedule(combined);
+            
+            var disposeHandle = occluded.Dispose(handle);
+            
+            m_PreCullingSystem.AddCullingDataWriter(disposeHandle);
+            Dependency = disposeHandle;
 
-                var occluded = OcclusionUtilities.FindOccludedEntities(staticTreeRO, camPos, camDir, 1000f, Allocator.TempJob);
-
-                // TESTING ONLY RIGHT NOW
-                var terrainSystem = World.GetExistingSystemManaged<TerrainSystem>();
-                var terrainData = terrainSystem.GetHeightData();
-
-                var terrainOccluded = OcclusionUtilities.FindTerrainOccludedEntities(
-                    staticTreeRO,
-                    terrainData,
-                    camPos,
-                    camDir,
-                    600f,           // max distance to check
-                    12,             // samples per ray
-                    0.5f,           // clearance meters
-                    Allocator.TempJob
-                );
-
-                // Union with your existing occluded list
-                for (int i = 0; i < terrainOccluded.Length; i++) {
-                    var pair = terrainOccluded[i];
-                    // avoid duplicates; optional small set or hash check
-                    bool exists = false;
-                    for (int j = 0; j < occluded.Length; j++) {
-                        if (occluded[j].entity == pair.entity) { exists = true; break; }
-                    }
-                    if (!exists) occluded.Add(pair);
-                }
-
-
-                // Build delta sets on main thread
-                var currentOccluded = new NativeParallelHashSet<Entity>(occluded.Length, Allocator.TempJob);
-                var toEnforce = new NativeList<(Entity, QuadTreeBoundsXZ)>(Allocator.TempJob);
-                for (int i = 0; i < occluded.Length; i++)
-                {
-                    currentOccluded.Add(occluded[i].entity);
-                    var (e,b) = occluded[i];
-                    if (!m_EnforcedEntities.Contains(e))
-                    {
-                        toEnforce.Add((e, b));
-                    }
-                }
-
-                var toRevert = new NativeList<Entity>(Allocator.TempJob);
-                var enforcedKeys = m_EnforcedEntities.GetKeyArray(Allocator.Temp);
-                for (int i = 0; i < enforcedKeys.Length; i++)
-                {
-                    var e = enforcedKeys[i];
-                    if (!currentOccluded.Contains(e))
-                    {
-                        toRevert.Add(e);
-                    }
-                }
-
-                currentOccluded.Dispose();
-
-                // Schedule writer job to apply delta and update caches
-                JobHandle writeDeps;
-                var staticTree = m_SearchSystem.GetStaticSearchTree(readOnly: false, out writeDeps);
-                var deltaJob = new ApplyOcclusionDeltaJob
-                {
-                    tree = staticTree,
-                    toEnforce = toEnforce,
-                    toRevert = toRevert,
-                    enforced = m_EnforcedEntities,
-                    originals = m_OriginalByEntity
-                };
-                var combined = JobHandle.CombineDependencies(Dependency, writeDeps);
-                var handle = deltaJob.Schedule(combined);
-
-                var disposeHandle = occluded.Dispose(handle);
-                disposeHandle = toEnforce.Dispose(disposeHandle);
-                disposeHandle = toRevert.Dispose(disposeHandle);
-
-                m_SearchSystem.AddStaticSearchTreeWriter(disposeHandle);
-                Dependency = disposeHandle;
-
-                // Only needed if running after PreCullingSystem, I think
-                //m_PreCullingSystem.ResetCulling();
-
-                m_LastCameraPos = camPos;
-                m_LastDirXZ = math.normalizesafe(new float3(camDir.x, 0f, camDir.z));
-                return;
-            }
-
+            m_LastCameraPos = camPos;
+            m_LastDirXZ = math.normalizesafe(new float3(camDir.x, 0f, camDir.z));
             return;
         }
 
-        private float3 m_LastDirXZ;
 
         private struct ApplyOcclusionDeltaJob : IJob
         {
-            public NativeQuadTree<Entity, QuadTreeBoundsXZ> tree;
-            [ReadOnly] public NativeList<(Entity, QuadTreeBoundsXZ)> toEnforce;
-            [ReadOnly] public NativeList<Entity> toRevert;
+            [NativeDisableParallelForRestriction]
+            public NativeList<PreCullingData> cullingData;
+            [ReadOnly] public NativeList<(Entity entity, QuadTreeBoundsXZ bounds)> occludedList;
             public NativeParallelHashSet<Entity> enforced;
             public NativeParallelHashMap<Entity, QuadTreeBoundsXZ> originals;
 
             public void Execute()
             {
-                // Revert entities no longer occluded
-                for (int i = 0; i < toRevert.Length; i++)
+                // Tech: Revert entities that were hidden but are no longer in occludedList
+                // User: unhide any objects that have come back into view
+                var enumOld = enforced.GetEnumerator();
+                while (enumOld.MoveNext())
                 {
-                    var e = toRevert[i];
-                    if (originals.TryGetValue(e, out var original))
+                    var kv = enumOld.Current;
+                    var e  = kv.Key;
+                    bool stillHidden = false;
+                    // check if in occludedList
+                    for (int oi = 0; oi < occludedList.Length; oi++)
                     {
-                        tree.TryUpdate(e, original);
-                        originals.Remove(e);
+                        if (occludedList[oi].entity.Equals(e)) { stillHidden = true; break; }
                     }
-                    enforced.Remove(e);
+                    if (!stillHidden)
+                    {
+                        if (originals.TryGetValue(e, out var origBounds))
+                        {
+                            // restore pass flags
+                            for (int j = 0; j < cullingData.Length; j++)
+                            {
+                                if (cullingData[j].m_Entity.Equals(e))
+                                {
+                                    var data = cullingData[j];
+                                    data.m_Flags |= PreCullingFlags.PassedCulling;
+                                    data.m_Timer = 0;
+                                    cullingData[j] = data;
+                                    break;
+                                }
+                            }
+                            originals.Remove(e);
+                        }
+                        enforced.Remove(e);
+                    }
                 }
+                enumOld.Dispose();
 
-                // Enforce newly occluded
-                for (int i = 0; i < toEnforce.Length; i++)
+                // Tech: Enforce any new occlusions not already tagged
+                // User: hide objects that just got blocked
+                for (int oi = 0; oi < occludedList.Length; oi++)
                 {
-                    var pair = toEnforce[i];
-                    var e = pair.Item1;
-                    var b = pair.Item2;
-                    originals.TryAdd(e, b);
-                    tree.TryUpdate(e, new QuadTreeBoundsXZ(b.m_Bounds, b.m_Mask, byte.MaxValue));
-                    enforced.Add(e);
+                    var (e,bounds) = occludedList[oi];
+                    if (!enforced.Contains(e))
+                    {
+                        originals.TryAdd(e, bounds);
+                        for (int j = 0; j < cullingData.Length; j++)
+                        {
+                            if (cullingData[j].m_Entity.Equals(e))
+                            {
+                                var data = cullingData[j];
+                                data.m_Flags &= ~PreCullingFlags.PassedCulling;
+                                data.m_Timer = byte.MaxValue;
+                                cullingData[j] = data;
+                                break;
+                            }
+                        }
+                        enforced.Add(e);
+                    }
                 }
             }
         }
