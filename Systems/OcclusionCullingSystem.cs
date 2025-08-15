@@ -8,6 +8,7 @@ using Colossal.Collections;
 using Game.Common;
 using Colossal.Logging;
 using Game.Simulation;
+using System;
 
 namespace OcclusionCulling
 {
@@ -15,7 +16,7 @@ namespace OcclusionCulling
     public partial class OcclusionCullingSystem : SystemBase
     {
         private static ILog s_log = Mod.log;
-        static readonly float kMoveThreshold= 1f;
+        static readonly float kMoveThreshold= 3f;
         private CameraUpdateSystem m_CameraSystem;
         private Game.Rendering.PreCullingSystem m_PreCullingSystem;
         private Game.Objects.SearchSystem m_SearchSystem;
@@ -55,19 +56,22 @@ namespace OcclusionCulling
 
             float3 camPos = lodParams.cameraPosition;
             float3 camDir = m_CameraSystem.activeViewer.forward;
-            // Tech: determine if camera moved, turned, or is looking straight down to skip heavy culling
-            // User: if you hardly move/turn or look straight down, skip shadow checks
+
+            // Bail if you are looking straight down, occlusion culling is unneeded
+            bool lookingDown = camDir.y < -0.9f;
+            if (lookingDown) return;
+
+            // Bail if the camera only moves a tiny bit, esp to prevent frequent job triggers with rapid camera movement
             float2 deltaXZ = new float2(camPos.x - m_LastCameraPos.x, camPos.z - m_LastCameraPos.z);
             bool moved = math.length(deltaXZ) > kMoveThreshold;
-            float2 currentDirXZ = math.normalize(new float2(camDir.x, camDir.z));
-            bool turned = math.dot(currentDirXZ, m_LastDirXZ) < 0.996f; // threshold ~5° turn
-            bool lookingDown = camDir.y < -0.9f;
-            if ((!moved && !turned) || lookingDown)
-            {
-                return;
-            }
+            if (!moved) return;
 
-            s_log.Info($"Starting culling system: camPos({camPos}), camDir({camDir}), currentDirXZ({currentDirXZ})");
+            float2 currentDirXZ = math.normalize(new float2(camDir.x, camDir.z));
+            //bool turned = math.dot(currentDirXZ, m_LastDirXZ) < 0.996f; // threshold ~5° turn
+            
+
+            var msTimer = DateTimeOffset.Now.ToUnixTimeMilliseconds();
+            s_log.Info($"tm({msTimer}) Starting culling system: camPos({camPos}), camDir({camDir}), currentDirXZ({currentDirXZ})");
 
             // TODO: only have utility find XX max culling entities this frame
             JobHandle readDeps;
@@ -75,6 +79,7 @@ namespace OcclusionCulling
             Dependency = JobHandle.CombineDependencies(Dependency, readDeps);
 
             var terrainData = m_TerrainSystem.GetHeightData();
+            s_log.Info($"tm({DateTimeOffset.Now.ToUnixTimeMilliseconds() - msTimer}) Starting culling system: camPos({camPos}), camDir({camDir}), currentDirXZ({currentDirXZ})");
 
             // Many calculations on the main thread, not ideal
             var occluded = OcclusionUtilities.FindTerrainOccludedEntities(
@@ -88,12 +93,10 @@ namespace OcclusionCulling
                 Allocator.TempJob
             );
 
-            if (occluded.Length > 1)
-                s_log.Info($"...found occluded from utilities class. occludedCount({occluded.Length}), occludedSample1Entity({occluded[0].entity}), occludedSample1Bounds(min[{occluded[0].bounds.m_Bounds.min}], max[{occluded[0].bounds.m_Bounds.max}])");
+            s_log.Info($"tm({DateTimeOffset.Now.ToUnixTimeMilliseconds() - msTimer}) Utility finished.");
 
             // Tech: let the apply-delta job do both revert and enforce in one pass
             // User: we’ll handle hiding and revealing all objects in the job itself
-
             // Schedule writer job to apply delta and update caches
             var cullingData = m_PreCullingSystem.GetCullingData(readOnly: false, out var writeDeps);
             var deltaJob = new ApplyOcclusionDeltaJob
@@ -105,7 +108,7 @@ namespace OcclusionCulling
             };
             var combined = JobHandle.CombineDependencies(Dependency, writeDeps);
             var handle = deltaJob.Schedule(combined);
-            
+            s_log.Info($"tm({DateTimeOffset.Now.ToUnixTimeMilliseconds() - msTimer}) Delta job scheduled.");
             var disposeHandle = occluded.Dispose(handle);
             
             m_PreCullingSystem.AddCullingDataWriter(disposeHandle);
@@ -149,10 +152,10 @@ namespace OcclusionCulling
                             {
                                 if (cullingData[j].m_Entity.Equals(e))
                                 {
-                                    var data = cullingData[j];
-                                    data.m_Flags |= PreCullingFlags.PassedCulling;
-                                    data.m_Timer = 0;
-                                    cullingData[j] = data;
+                                    //var data = cullingData[j];
+                                    //data.m_Flags |= PreCullingFlags.PassedCulling;
+                                    //data.m_Timer = 0;
+                                    //cullingData[j] = data;
                                     break;
                                 }
                             }
