@@ -59,63 +59,6 @@ namespace OcclusionCulling
             return false;
         }
 
-        public static NativeList<(Entity entity, QuadTreeBoundsXZ bounds)> FindOccludedEntities(
-            NativeQuadTree<Entity, QuadTreeBoundsXZ> quadTree,
-            float3 cameraPosition,
-            float3 cameraDirection,
-            float maxProcessingDistance = 250f,
-            Allocator allocator = Allocator.TempJob,
-            EntityCommandBuffer ecb = default)
-        {
-            var result = new NativeList<(Entity, QuadTreeBoundsXZ)>(allocator);
-
-            var collector = new CandidateAndShadowCasterCollector(
-                cameraPosition,
-                cameraDirection,
-                maxProcessingDistance,
-                0.1f,
-                32
-            );
-            quadTree.Iterate(ref collector, 0);
-
-            if (collector.casters.Length == 0)
-            {
-                collector.Dispose();
-                return result;
-            }
-
-            var shadowBoxes = new NativeList<QuadTreeBoundsXZ>(collector.casters.Length, Allocator.Temp);
-            var casterDistances = new NativeList<float>(collector.casters.Length, Allocator.Temp);
-            for (int i = 0; i < collector.casters.Length; i++)
-            {
-                var caster = collector.casters[i];
-                var shadowBox = CalculateShadowBox(caster.bounds, cameraPosition, cameraDirection, maxProcessingDistance);
-                var distance = math.distance(cameraPosition, (caster.bounds.m_Bounds.min + caster.bounds.m_Bounds.max) * 0.5f);
-                shadowBoxes.Add(shadowBox);
-                casterDistances.Add(distance);
-                
-                // Tag shadow caster entities with their shadow bounds
-                if (ecb != default)
-                {
-                    ecb.AddComponent(caster.Item1, new OccludedTag { shadowBounds = shadowBox.m_Bounds });
-                }
-            }
-
-            for (int i = 0; i < collector.candidates.Length; i++)
-            {
-                var (entity, bounds) = collector.candidates[i];
-                if (IsObjectOccluded(entity, bounds, shadowBoxes, casterDistances, cameraPosition, cameraDirection))
-                {
-                    result.Add((entity, bounds));
-                }
-            }
-
-            shadowBoxes.Dispose();
-            casterDistances.Dispose();
-            collector.Dispose();
-            return result;
-        }
-
 		// Minimal terrain LOS occlusion test (POC). Just for testing right now.
 		public static NativeList<(Entity entity, QuadTreeBoundsXZ bounds)> FindTerrainOccludedEntities(
 			NativeQuadTree<Entity, QuadTreeBoundsXZ> quadTree,
@@ -146,6 +89,8 @@ namespace OcclusionCulling
 
             for (int rayIndex = 0; rayIndex < numRays; rayIndex++)
             {
+
+                
                 // Tech: compute normalized ray index [0=left edge, 1=right edge] across all rays
                 // User: figure out which view-line from leftmost to rightmost this is
                 float rayFrac = rayIndex / (float)(numRays - 1);
@@ -165,6 +110,7 @@ namespace OcclusionCulling
                 );
                 float stepDistance = maxProcessingDistance / numSamples;
 
+                s_log.Info($"Inside FindTerrainOccludedEntities, first for loop processing ray: rayIndex({rayIndex}), rayAngle({rayAngle}), rayDirXZ({rayDirXZ}), cameraXZ({cameraXZ}), cameraForwardXZ({cameraForwardXZ})");
                 for (int sampleIndex = 0; sampleIndex < numSamples; sampleIndex++)
                 {
                     // Tech: march along the ray by equal steps
@@ -181,18 +127,26 @@ namespace OcclusionCulling
                     float terrainHeightSample = TerrainUtils.GetHeightRange(ref terrainHeight, sampleBounds).max;
 
                     // Tech: get highest object height in this area
-                    objectOccluders.Clear();
-                    quadTree.Query(ref objectOccluders, sampleBounds);
+                    var rq = new RegionQueryCollector {
+                        searchRegion = new QuadTreeBoundsXZ(sampleBounds, BoundsMask.AllLayers, 0),
+                        results = objectOccluders
+                    };
+                    quadTree.Iterate(ref rq, 0);
+
                     float highestOccluderY = terrainHeightSample;
                     for (int occIdx = 0; occIdx < objectOccluders.Length; occIdx++)
                     {
-                        float topY = objectOccluders[occIdx].bounds.m_Bounds.max.y;
+                        float topY = objectOccluders[occIdx].Item2.m_Bounds.max.y;
                         if (topY > highestOccluderY) highestOccluderY = topY;
                     }
 
                     occlusionHeightMap[rayIndex * numSamples + sampleIndex] = highestOccluderY;
                 }
+
+                s_log.Info($"Inside FindTerrainOccludedEntities, terrain result for rayIndex({rayIndex}), currentOcclusionHeightMapCount({occlusionHeightMap.Length})");
             }
+
+            
 
             // Tech: gather candidate objects within view cone
             // User: pick the objects you might be looking at
@@ -206,6 +160,8 @@ namespace OcclusionCulling
             quadTree.Iterate(ref candidateCollector, 0);
             int candidateCount = candidateCollector.candidates.Length;
             var occludedEntities = new NativeList<(Entity, QuadTreeBoundsXZ)>(candidateCount, allocator);
+
+            s_log.Info($"Inside FindTerrainOccludedEntities, found candidates: candidateCount({candidateCount})");
 
             for (int candIdx = 0; candIdx < candidateCount; candIdx++)
             {
@@ -226,7 +182,7 @@ namespace OcclusionCulling
                 int rayIdx = (int)math.clamp((signedAngle / halfFovRad * 0.5f + 0.5f) * (numRays - 1), 0, numRays - 1);
 
                 // Tech: map distance to sample index
-                int sampleIdx = (int)math.clamp(distToObject / maxProcessingDistance * numSamples, 0, numSamples - 1);
+                int sampleIdx = (int)math.clamp(distToObject / maxProcessingDistance * (numSamples-1), 0, numSamples - 1);
 
                 float occlusionHeight = occlusionHeightMap[rayIdx * numSamples + sampleIdx];
 
@@ -307,6 +263,22 @@ namespace OcclusionCulling
             {
                 if (candidates.IsCreated) candidates.Dispose();
                 if (casters.IsCreated) casters.Dispose();
+            }
+        }
+
+        public struct RegionQueryCollector : INativeQuadTreeIterator<Entity, QuadTreeBoundsXZ>
+        {
+            public QuadTreeBoundsXZ searchRegion;
+            public NativeList<(Entity, QuadTreeBoundsXZ)> results;
+
+            public bool Intersect(QuadTreeBoundsXZ nodeBounds)
+            {
+                return nodeBounds.Intersect(searchRegion);
+            }
+
+            public void Iterate(QuadTreeBoundsXZ itemsBounds, Entity itemEntity)
+            {
+                results.Add((itemEntity, itemsBounds));
             }
         }
     }

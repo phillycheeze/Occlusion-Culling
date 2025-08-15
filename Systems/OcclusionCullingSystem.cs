@@ -19,9 +19,9 @@ namespace OcclusionCulling
         private CameraUpdateSystem m_CameraSystem;
         private Game.Rendering.PreCullingSystem m_PreCullingSystem;
         private Game.Objects.SearchSystem m_SearchSystem;
-        private Game.Terrain.TerrainSystem m_TerrainSystem;
+        private Game.Simulation.TerrainSystem m_TerrainSystem;
         private float3 m_LastCameraPos;
-        private float3 m_LastDirXZ;
+        private float2 m_LastDirXZ;
         private NativeParallelHashSet<Entity> m_EnforcedEntities;
         private NativeParallelHashMap<Entity, QuadTreeBoundsXZ> m_OriginalByEntity;
 
@@ -31,9 +31,9 @@ namespace OcclusionCulling
             m_CameraSystem = World.GetExistingSystemManaged<CameraUpdateSystem>();
             m_PreCullingSystem = World.GetExistingSystemManaged<Game.Rendering.PreCullingSystem>();
             m_SearchSystem = World.GetExistingSystemManaged<Game.Objects.SearchSystem>();
-            m_TerrainSystem = World.GetExistingSystemManaged<Game.Terrain.TerrainSystem>();
+            m_TerrainSystem = World.GetExistingSystemManaged<Game.Simulation.TerrainSystem>();
             m_LastCameraPos = float3.zero;
-            m_LastDirXZ = float3.zero;
+            m_LastDirXZ = float2.zero;
             m_EnforcedEntities = new NativeParallelHashSet<Entity>(1024, Allocator.Persistent);
             m_OriginalByEntity = new NativeParallelHashMap<Entity, QuadTreeBoundsXZ>(1024, Allocator.Persistent);
         }
@@ -67,6 +67,8 @@ namespace OcclusionCulling
                 return;
             }
 
+            s_log.Info($"Starting culling system: camPos({camPos}), camDir({camDir}), currentDirXZ({currentDirXZ})");
+
             // TODO: only have utility find XX max culling entities this frame
             JobHandle readDeps;
             var staticTreeRO = m_SearchSystem.GetStaticSearchTree(readOnly: true, out readDeps);
@@ -85,6 +87,9 @@ namespace OcclusionCulling
                 0.5f,           // clearance meters
                 Allocator.TempJob
             );
+
+            if (occluded.Length > 1)
+                s_log.Info($"...found occluded from utilities class. occludedCount({occluded.Length}), occludedSample1Entity({occluded[0].entity}), occludedSample1Bounds(min[{occluded[0].bounds.m_Bounds.min}], max[{occluded[0].bounds.m_Bounds.max}])");
 
             // Tech: let the apply-delta job do both revert and enforce in one pass
             // User: we’ll handle hiding and revealing all objects in the job itself
@@ -107,7 +112,7 @@ namespace OcclusionCulling
             Dependency = disposeHandle;
 
             m_LastCameraPos = camPos;
-            m_LastDirXZ = math.normalizesafe(new float3(camDir.x, 0f, camDir.z));
+            m_LastDirXZ = math.normalizesafe(new float2(camDir.x, camDir.z));
             return;
         }
 
@@ -124,11 +129,11 @@ namespace OcclusionCulling
             {
                 // Tech: Revert entities that were hidden but are no longer in occludedList
                 // User: unhide any objects that have come back into view
+                s_log.Info($"Inside Job.Execute: occludedListCount({occludedList.Length}, enforcedCount({enforced.Count()}, originalsCount({originals.Count()})");
                 var enumOld = enforced.GetEnumerator();
                 while (enumOld.MoveNext())
                 {
-                    var kv = enumOld.Current;
-                    var e  = kv.Key;
+                    Entity e = enumOld.Current;
                     bool stillHidden = false;
                     // check if in occludedList
                     for (int oi = 0; oi < occludedList.Length; oi++)
