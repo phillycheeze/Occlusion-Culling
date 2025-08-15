@@ -71,146 +71,63 @@ namespace OcclusionCulling
 			float clearanceMeters = 0.5f,
 			Allocator allocator = Allocator.TempJob)
 		{
-            // Tech: Prepare screen-space occlusion height map for terrain and objects
-            // User: Shoot many view-lines from your camera and see how high each line is blocked
-            int numRays = 32;
-            int numSamples = math.max(2, samplesPerRay);
-            var occlusionHeightMap = new NativeArray<float>(numRays * numSamples, Allocator.Temp);
+            // Tech: one-pass per-candidate visibility test via ray-marching
+            // User: for each object, shoot a line to its top and see if anything blocks it
+            var result = new NativeList<(Entity, QuadTreeBoundsXZ)>(allocator);
+            var collector = new CandidateAndShadowCasterCollector(
+                cameraPosition, cameraDirection, maxProcessingDistance, 0.1f, 32);
+            quadTree.Iterate(ref collector, 0);
+            int candidateCount = collector.candidates.Length;
             var objectOccluders = new NativeList<(Entity, QuadTreeBoundsXZ)>(allocator);
+            var sampleBounds = new Bounds3(default, default);
+            float2 camXZ = new float2(cameraPosition.x, cameraPosition.z);
+            float camY   = cameraPosition.y;
+            int   steps  = math.max(2, samplesPerRay);
+            float stepDistance = maxProcessingDistance / (steps - 1);
 
-            float2 cameraXZ = new float2(cameraPosition.x, cameraPosition.z);
-            float cameraHeight = cameraPosition.y;
-            float2 cameraForwardXZ = math.normalize(new float2(cameraDirection.x, cameraDirection.z));
-            float halfFovRad = math.radians(45f);
-
-            Bounds3 sampleBounds = new Bounds3(
-                new float3(0f, -10000f, 0f),
-                new float3(0f,  10000f, 0f)
-            );
-
-            for (int rayIndex = 0; rayIndex < numRays; rayIndex++)
+            for (int ci = 0; ci < candidateCount; ci++)
             {
-
-                
-                // Tech: compute normalized ray index [0=left edge, 1=right edge] across all rays
-                // User: figure out which view-line from leftmost to rightmost this is
-                float rayFrac = rayIndex / (float)(numRays - 1);
-
-                // Tech: map normalized fraction into signed angle offset within half-field-of-view
-                // User: tilt this view-line left or right across your viewing cone
-                float rayAngle = (rayFrac * 2f - 1f) * halfFovRad;
-
-                // Tech: compute cosine and sine once to rotate the camera's forward vector by rayAngle
-                // User: turn your forward direction by that angle to get the ray direction
-                float cosA = math.cos(rayAngle);
-                float sinA = math.sin(rayAngle);
-
-                float2 rayDirXZ = new float2(
-                    cameraForwardXZ.x * cosA - cameraForwardXZ.y * sinA,
-                    cameraForwardXZ.x * sinA + cameraForwardXZ.y * cosA
-                );
-                float stepDistance = maxProcessingDistance / (numSamples-1);
-
-                s_log.Info($"Inside FindTerrainOccludedEntities, first for loop processing ray: rayIndex({rayIndex}), rayAngle({rayAngle}), rayDirXZ({rayDirXZ}), cameraXZ({cameraXZ}), cameraForwardXZ({cameraForwardXZ})");
-                for (int sampleIndex = 0; sampleIndex < numSamples; sampleIndex++)
-                {
-                    // Tech: march along the ray by equal steps
-                    // User: pick points evenly spaced on the view-line
-                    float distanceAlongRay = stepDistance * sampleIndex;
-                    float2 sampleXZ = cameraXZ + rayDirXZ * distanceAlongRay;
-
-                    sampleBounds.min.x = sampleXZ.x - 0.5f;
-                    sampleBounds.min.z = sampleXZ.y - 0.5f;
-                    sampleBounds.max.x = sampleXZ.x + 0.5f;
-                    sampleBounds.max.z = sampleXZ.y + 0.5f;
-
-                    // Tech: get terrain height at this sample
-                    float terrainHeightSample = TerrainUtils.GetHeightRange(ref terrainHeight, sampleBounds).max;
-
-                    // Tech: get highest object height in this area
-                    objectOccluders.Clear();
-                    var rq = new RegionQueryCollector {
-                        searchRegion = new QuadTreeBoundsXZ(sampleBounds, BoundsMask.AllLayers, 0),
-                        results = objectOccluders
-                    };
-                    quadTree.Iterate(ref rq, 0);
-
-                    float highestOccluderY = terrainHeightSample;
-                    for (int occIdx = 0; occIdx < objectOccluders.Length; occIdx++)
-                    {
-                        float topY = objectOccluders[occIdx].Item2.m_Bounds.max.y;
-                        if (topY > highestOccluderY) highestOccluderY = topY;
-                    }
-
-                    occlusionHeightMap[rayIndex * numSamples + sampleIndex] = highestOccluderY;
-                }
-
-                s_log.Info($"Inside FindTerrainOccludedEntities, terrain result for rayIndex({rayIndex}), currentOcclusionHeightMapCount({occlusionHeightMap.Length})");
-            }
-
-            
-
-            // Tech: gather candidate objects within view cone
-            // User: pick the objects you might be looking at
-            var candidateCollector = new CandidateAndShadowCasterCollector(
-                cameraPosition,
-                cameraDirection,
-                maxProcessingDistance,
-                0.1f,
-                32
-            );
-            quadTree.Iterate(ref candidateCollector, 0);
-            int candidateCount = candidateCollector.candidates.Length;
-            var occludedEntities = new NativeList<(Entity, QuadTreeBoundsXZ)>(candidateCount, allocator);
-
-            s_log.Info($"Inside FindTerrainOccludedEntities, found candidates: candidateCount({candidateCount})");
-
-            for (int candIdx = 0; candIdx < candidateCount; candIdx++)
-            {
-                // Tech: compute object direction and distance
-                // User: see where each object is relative to you
-                var (entity, bounds) = candidateCollector.candidates[candIdx];
-                float3 objectCenter = (bounds.m_Bounds.min + bounds.m_Bounds.max) * 0.5f;
-                float2 toObjectXZ = new float2(objectCenter.x - cameraXZ.x, objectCenter.z - cameraXZ.y);
-                float distToObject = math.length(toObjectXZ);
-                if (distToObject < 1f || distToObject > maxProcessingDistance) continue;
-                float2 dirToObject = math.normalize(toObjectXZ);
-
-                // Tech: map direction to ray index
-                float signedAngle = math.atan2(
-                    cameraForwardXZ.x * dirToObject.y - cameraForwardXZ.y * dirToObject.x,
-                    math.dot(cameraForwardXZ, dirToObject)
-                );
-                int rayIdx = (int)math.clamp((signedAngle / halfFovRad * 0.5f + 0.5f) * (numRays - 1), 0, numRays - 1);
-
-                // Tech: map distance to sample index
-                int sampleIdx = (int)math.clamp(distToObject / maxProcessingDistance * (numSamples - 1), 0, numSamples - 1);
-
-                float occlusionHeight = occlusionHeightMap[rayIdx * numSamples + sampleIdx];
-
-                // Tech: compute line-of-sight height to object top
+                var (entity, bounds) = collector.candidates[ci];
+                float3 center3  = (bounds.m_Bounds.min + bounds.m_Bounds.max) * 0.5f;
+                float2 centerXZ = new float2(center3.x, center3.z);
+                float dist      = math.distance(camXZ, centerXZ);
+                if (dist < 1f || dist > maxProcessingDistance) continue;
+                float2 dir = (centerXZ - camXZ) / dist;
                 float objectTopY = bounds.m_Bounds.max.y;
+                bool hidden = false;
 
-                if (Mathf.Approximately(objectTopY, occlusionHeight)) continue;
-
-                float lodFrac = sampleIdx / (float)(numSamples - 1);
-                float losHeight = math.lerp(cameraHeight, objectTopY, lodFrac);
-
-                // Tech: if occlusion height is higher, object is hidden
-                // User: if a hill or another object blocks your view, this object is hidden
-                if (occlusionHeight > (losHeight - clearanceMeters))
+                for (int s = 0; s < steps; s++)
                 {
-                    occludedEntities.Add((entity, bounds));
+                    float r = stepDistance * s;
+                    float2 sampleXZ = camXZ + dir * r;
+                    sampleBounds.min = new float3(sampleXZ.x - 0.5f, -10000f, sampleXZ.y - 0.5f);
+                    sampleBounds.max = new float3(sampleXZ.x + 0.5f,  10000f, sampleXZ.y + 0.5f);
+                    float terrainY = TerrainUtils.GetHeightRange(ref terrainHeight, sampleBounds).max;
+                    objectOccluders.Clear();
+                    var rq = new RegionQueryCollector { searchRegion = new QuadTreeBoundsXZ(sampleBounds, BoundsMask.AllLayers, 0), results = objectOccluders };
+                    quadTree.Iterate(ref rq, 0);
+                    float maxY = terrainY;
+                    for (int j = 0; j < objectOccluders.Length; j++)
+                    {
+                        var occBound = objectOccluders[j].Item2.m_Bounds;
+                        float y = occBound.max.y;
+                        if (y > maxY) maxY = y;
+                    }
+                    float tFrac = dist > 0f ? r / dist : 1f;
+                    float losY = math.lerp(camY, objectTopY, tFrac);
+                    if (maxY > losY - clearanceMeters)
+                    {
+                        s_log.Info($"Debug: culling {entity} at r={r:F1}, maxY={maxY:F1}, losY={losY:F1}");
+                        hidden = true;
+                        break;
+                    }
                 }
+                if (hidden)
+                    result.Add((entity, bounds));
             }
-
-            // Tech: clean up temporary buffers
-            // User: finished checking all objects
             objectOccluders.Dispose();
-            occlusionHeightMap.Dispose();
-            candidateCollector.Dispose();
-
-            return occludedEntities;
+            collector.Dispose();
+            return result;
 		}
 
         public struct CandidateAndShadowCasterCollector : INativeQuadTreeIterator<Entity, QuadTreeBoundsXZ>
