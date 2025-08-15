@@ -7,6 +7,7 @@ using Colossal.Mathematics;
 using Game.Rendering;
 using Colossal.Logging;
 using Game.Simulation;
+using UnityEngine;
 
 namespace OcclusionCulling
 {
@@ -108,14 +109,14 @@ namespace OcclusionCulling
                     cameraForwardXZ.x * cosA - cameraForwardXZ.y * sinA,
                     cameraForwardXZ.x * sinA + cameraForwardXZ.y * cosA
                 );
-                float stepDistance = maxProcessingDistance / numSamples;
+                float stepDistance = maxProcessingDistance / (numSamples-1);
 
                 s_log.Info($"Inside FindTerrainOccludedEntities, first for loop processing ray: rayIndex({rayIndex}), rayAngle({rayAngle}), rayDirXZ({rayDirXZ}), cameraXZ({cameraXZ}), cameraForwardXZ({cameraForwardXZ})");
                 for (int sampleIndex = 0; sampleIndex < numSamples; sampleIndex++)
                 {
                     // Tech: march along the ray by equal steps
                     // User: pick points evenly spaced on the view-line
-                    float distanceAlongRay = stepDistance * (sampleIndex + 1);
+                    float distanceAlongRay = stepDistance * sampleIndex;
                     float2 sampleXZ = cameraXZ + rayDirXZ * distanceAlongRay;
 
                     sampleBounds.min.x = sampleXZ.x - 0.5f;
@@ -127,6 +128,7 @@ namespace OcclusionCulling
                     float terrainHeightSample = TerrainUtils.GetHeightRange(ref terrainHeight, sampleBounds).max;
 
                     // Tech: get highest object height in this area
+                    objectOccluders.Clear();
                     var rq = new RegionQueryCollector {
                         searchRegion = new QuadTreeBoundsXZ(sampleBounds, BoundsMask.AllLayers, 0),
                         results = objectOccluders
@@ -182,13 +184,16 @@ namespace OcclusionCulling
                 int rayIdx = (int)math.clamp((signedAngle / halfFovRad * 0.5f + 0.5f) * (numRays - 1), 0, numRays - 1);
 
                 // Tech: map distance to sample index
-                int sampleIdx = (int)math.clamp(distToObject / maxProcessingDistance * (numSamples-1), 0, numSamples - 1);
+                int sampleIdx = (int)math.clamp(distToObject / maxProcessingDistance * (numSamples - 1), 0, numSamples - 1);
 
                 float occlusionHeight = occlusionHeightMap[rayIdx * numSamples + sampleIdx];
 
                 // Tech: compute line-of-sight height to object top
                 float objectTopY = bounds.m_Bounds.max.y;
-                float lodFrac = (sampleIdx + 1) / (float)numSamples;
+
+                if (Mathf.Approximately(objectTopY, occlusionHeight)) continue;
+
+                float lodFrac = sampleIdx / (float)(numSamples - 1);
                 float losHeight = math.lerp(cameraHeight, objectTopY, lodFrac);
 
                 // Tech: if occlusion height is higher, object is hidden
