@@ -12,7 +12,7 @@ using System;
 
 namespace OcclusionCulling
 {
-    [UpdateAfter(typeof(Game.Rendering.PreCullingSystem))]
+    [UpdateBefore(typeof(Game.Rendering.PreCullingSystem))]
     public partial class OcclusionCullingSystem : SystemBase
     {
         private static ILog s_log = Mod.log;
@@ -67,7 +67,6 @@ namespace OcclusionCulling
             {
                 // Nothing to do, update last camera state and return
                 m_LastCameraPos = camPos;
-                m_LastDirXZ = math.normalizesafe(new float2(camDir.x, camDir.z));
                 return;
             }
             if (moved)
@@ -100,46 +99,53 @@ namespace OcclusionCulling
             // Tech: let the apply-delta job do both revert and enforce in one pass
             // User: we’ll handle hiding and revealing all objects in the job itself
             // Schedule writer job to apply delta and update caches
-            var cullingData = m_PreCullingSystem.GetCullingData(readOnly: false, out var writeDeps);
+            //var cullingData = m_PreCullingSystem.GetCullingData(readOnly: false, out var writeDeps);
+            //Dependency = JobHandle.CombineDependencies(Dependency, writeDeps);
+
             var deltaJob = new ApplyOcclusionDeltaJob
             {
-                cullingData   = cullingData,
+                //cullingData   = cullingData,
                 occludedList  = occluded,
                 enforced      = m_EnforcedEntities,
-                originals     = m_OriginalByEntity
+                originals     = m_OriginalByEntity,
+                cullingInfo   = GetComponentLookup<CullingInfo>(false)
             };
-            var combined = JobHandle.CombineDependencies(Dependency, writeDeps);
-            var handle = deltaJob.Schedule(combined);
+            
+            var handle = deltaJob.Schedule(Dependency);
             s_log.Info($"tm({DateTimeOffset.Now.ToUnixTimeMilliseconds() - msTimer}) Delta job scheduled.");
             var disposeHandle = occluded.Dispose(handle);
 
             occlusionResumeIndex = nextIndex;
             
-            m_PreCullingSystem.AddCullingDataWriter(disposeHandle);
+            //m_PreCullingSystem.AddCullingDataWriter(disposeHandle);
             // ensure PreCullingSystem waits on our delta job before next read
-            m_PreCullingSystem.AddCullingDataReader(disposeHandle);
+            //m_PreCullingSystem.AddCullingDataReader(disposeHandle);
             Dependency = disposeHandle;
 
+            m_PreCullingSystem.ResetCulling();
+
+            //m_PreCullingSystem.ResetCulling();
             m_LastCameraPos = camPos;
             return;
         }
 
-
+        // TODO: Maybe just use nativearrays for tracking entity cache, then doing a simple intersection call to generate diffs
         private struct ApplyOcclusionDeltaJob : IJob
         {
-            [NativeDisableParallelForRestriction]
-            public NativeList<PreCullingData> cullingData;
+            //[NativeDisableParallelForRestriction]
+            //public NativeList<PreCullingData> cullingData;
             [ReadOnly] public NativeList<(Entity entity, QuadTreeBoundsXZ bounds)> occludedList;
             public NativeParallelHashSet<Entity> enforced;
             public NativeParallelHashMap<Entity, QuadTreeBoundsXZ> originals;
+            public ComponentLookup<CullingInfo> cullingInfo;
 
             public void Execute()
             {
                 // Tech: Revert entities that were hidden but are no longer in occludedList
                 // User: unhide any objects that have come back into view
-                s_log.Info($"Inside Job.Execute: occludedListCount({occludedList.Length}, enforcedCount({enforced.Count()}, originalsCount({originals.Count()})");
+                //s_log.Info($"Inside Job.Execute: occludedListCount({occludedList.Length}, enforcedCount({enforced.Count()}, originalsCount({originals.Count()})");
                 // First pass: collect entities to unhide without mutating the set during iteration
-                var toUnhide = new NativeList<Entity>(Allocator.Temp);
+                var toUnhide = new NativeList<Entity>(Allocator.TempJob);
                 var enumOld = enforced.GetEnumerator();
                 while (enumOld.MoveNext())
                 {
@@ -163,18 +169,33 @@ namespace OcclusionCulling
                     var e = toUnhide[ui];
                     if (originals.TryGetValue(e, out var origBounds))
                     {
-                        // restore pass flags
-                        for (int j = 0; j < cullingData.Length; j++)
-                        {
-                            if (cullingData[j].m_Entity.Equals(e))
-                            {
-                                var data = cullingData[j];
-                                data.m_Flags |= PreCullingFlags.PassedCulling;
-                                data.m_Timer = 0;
-                                cullingData[j] = data;
-                                break;
-                            }
-                        }
+
+                        //for (int j = 0; j < cullingData.Length; j++)
+                        //{
+                        //    if (cullingData[j].m_Entity.Equals(e))
+                        //    {
+                        //        var data = cullingData[j];
+                        //        data.m_Flags |= PreCullingFlags.PassedCulling;
+                        //        data.m_Flags |= PreCullingFlags.Updated;
+                        //        data.m_Flags |= PreCullingFlags.NearCameraUpdated;
+                        //        data.m_Timer = 0;
+                        //        cullingData[j] = data;
+                        //        break;
+                        //    }
+                        //}
+                        ref var ci = ref cullingInfo.GetRefRWOptional(e).ValueRW;
+                        ci.m_Mask |= BoundsMask.NormalLayers;
+                        ci.m_Mask |= BoundsMask.Debug;
+                        ci.m_MinLod = 110;
+                        //var newData = new PreCullingData
+                        //{
+                        //    m_Entity = e,
+                        //    m_Flags = PreCullingFlags.PassedCulling | PreCullingFlags.Updated | PreCullingFlags.NearCameraUpdated,
+                        //    m_Timer = 0,
+                        //    m_UpdateFrame = -1
+                        //};
+                        //cullingData.Add(newData);
+
                         originals.Remove(e);
                     }
                     enforced.Remove(e);
@@ -188,18 +209,24 @@ namespace OcclusionCulling
                     var (e,bounds) = occludedList[oi];
                     if (!enforced.Contains(e))
                     {
+                        ref var ci = ref cullingInfo.GetRefRWOptional(e).ValueRW;
+                        ci.m_MinLod = byte.MaxValue;
+                        ci.m_Mask &= ~(BoundsMask.NormalLayers | BoundsMask.Debug);
+
+                        s_log.Info($"Attempted to cull e({e.Index}) with m_Mask({ci.m_Mask})");
+
                         originals.TryAdd(e, bounds);
-                        for (int j = 0; j < cullingData.Length; j++)
-                        {
-                            if (cullingData[j].m_Entity.Equals(e))
-                            {
-                                var data = cullingData[j];
-                                data.m_Flags &= ~PreCullingFlags.PassedCulling;
-                                data.m_Timer = byte.MaxValue;
-                                cullingData[j] = data;
-                                break;
-                            }
-                        }
+                        //for (int j = 0; j < cullingData.Length; j++)
+                        //{
+                        //    if (cullingData[j].m_Entity.Equals(e))
+                        //    {
+                        //        var data = cullingData[j];
+                        //        data.m_Flags &= ~PreCullingFlags.PassedCulling;
+                        //        data.m_Timer = byte.MaxValue;
+                        //        cullingData[j] = data;
+                        //        break;
+                        //    }
+                        //}
                         enforced.Add(e);
                     }
                 }

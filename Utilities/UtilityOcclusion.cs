@@ -15,6 +15,7 @@ namespace OcclusionCulling
     {
         private static ILog s_log = Mod.log;
         private static float maxProcessingDistance = 1000f;
+        private static float maxObjectOccluderThresholdDistance = 100f; // Skip object "shadow" casters after a certain distance since their shadows are too small anyways
         private static int samplesPerRay = 12;
         private static float clearanceMeters = 0.5f;
 
@@ -77,10 +78,16 @@ namespace OcclusionCulling
                     float tFrac = dist > 0f ? r / dist : 1f;
                     float losY = math.lerp(camY, objectTopY, tFrac);
 
-                    // Short circuit if terrain is blocking object already
+                    // Break if terrain is blocking object already
                     if (terrainY > losY - clearanceMeters)
                     {
                         hidden = true; break;
+                    }
+
+                    // Short circuit if we are passed the object occluder threshold
+                    if (r >= maxObjectOccluderThresholdDistance)
+                    {
+                        continue;
                     }
 
                     objectOccluders.Clear();
