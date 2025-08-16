@@ -125,6 +125,8 @@ namespace OcclusionCulling
                 if (hidden)
                 {
                     result.Add((entity, bounds));
+                    bounds.m_MinLod = byte.MaxValue;
+                    quadTree.TryUpdate(entity, bounds);
 
                     // Stop processing bc we hit max results
                     if (result.Length >= maxResults)

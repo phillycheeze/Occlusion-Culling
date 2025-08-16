@@ -9,9 +9,11 @@ using Game.Common;
 using Colossal.Logging;
 using Game.Simulation;
 using System;
+using Colossal.Entities;
 
 namespace OcclusionCulling
 {
+    [UpdateAfter(typeof(Game.Objects.SearchSystem))]
     [UpdateBefore(typeof(Game.Rendering.PreCullingSystem))]
     public partial class OcclusionCullingSystem : SystemBase
     {
@@ -79,7 +81,7 @@ namespace OcclusionCulling
             s_log.Info($"tm({msTimer}) Starting culling system: camPos({camPos}), camDir({camDir})");
 
             JobHandle readDeps;
-            var staticTreeRO = m_SearchSystem.GetStaticSearchTree(readOnly: true, out readDeps);
+            var staticTreeRW = m_SearchSystem.GetStaticSearchTree(readOnly: false, out readDeps);
             Dependency = JobHandle.CombineDependencies(Dependency, readDeps);
 
             var terrainData = m_TerrainSystem.GetHeightData();
@@ -87,7 +89,7 @@ namespace OcclusionCulling
 
             int nextIndex;
             var occluded = OcclusionUtilities.FindTerrainOccludedEntities(
-                staticTreeRO,
+                staticTreeRW,
                 terrainData,
                 camPos,
                 camDir,
@@ -101,14 +103,17 @@ namespace OcclusionCulling
             // Schedule writer job to apply delta and update caches
             //var cullingData = m_PreCullingSystem.GetCullingData(readOnly: false, out var writeDeps);
             //Dependency = JobHandle.CombineDependencies(Dependency, writeDeps);
-
+            var ecb = new EntityCommandBuffer();
             var deltaJob = new ApplyOcclusionDeltaJob
             {
                 //cullingData   = cullingData,
                 occludedList  = occluded,
                 enforced      = m_EnforcedEntities,
                 originals     = m_OriginalByEntity,
-                cullingInfo   = GetComponentLookup<CullingInfo>(false)
+                cullingInfo   = GetComponentLookup<CullingInfo>(false),
+                occludedTag   = GetComponentLookup<OcclusionDirtyTag>(false),
+                ecb           = ecb,
+                tree          = staticTreeRW
             };
             
             var handle = deltaJob.Schedule(Dependency);
@@ -117,12 +122,12 @@ namespace OcclusionCulling
 
             occlusionResumeIndex = nextIndex;
             
-            //m_PreCullingSystem.AddCullingDataWriter(disposeHandle);
+            m_SearchSystem.AddStaticSearchTreeWriter(disposeHandle);
             // ensure PreCullingSystem waits on our delta job before next read
             //m_PreCullingSystem.AddCullingDataReader(disposeHandle);
             Dependency = disposeHandle;
 
-            m_PreCullingSystem.ResetCulling();
+            //m_PreCullingSystem.ResetCulling();
 
             //m_PreCullingSystem.ResetCulling();
             m_LastCameraPos = camPos;
@@ -138,6 +143,9 @@ namespace OcclusionCulling
             public NativeParallelHashSet<Entity> enforced;
             public NativeParallelHashMap<Entity, QuadTreeBoundsXZ> originals;
             public ComponentLookup<CullingInfo> cullingInfo;
+            public ComponentLookup<OcclusionDirtyTag> occludedTag;
+            public EntityCommandBuffer ecb;
+            public NativeQuadTree<Entity, QuadTreeBoundsXZ> tree;
 
             public void Execute()
             {
@@ -167,9 +175,12 @@ namespace OcclusionCulling
                 for (int ui = 0; ui < toUnhide.Length; ui++)
                 {
                     var e = toUnhide[ui];
-                    if (originals.TryGetValue(e, out var origBounds))
-                    {
-
+                    if (originals.TryGetValue(e, out var old))
+                {
+                        old.m_Mask |= (BoundsMask.NormalLayers | BoundsMask.Debug);
+                        
+                        bool success = tree.TryUpdate(e, old);
+                        s_log.Info($"Trying to unhide e({e.Index}), masks({old.m_Mask}), oldMinLod({old.m_MinLod}), success({success})");
                         //for (int j = 0; j < cullingData.Length; j++)
                         //{
                         //    if (cullingData[j].m_Entity.Equals(e))
@@ -183,10 +194,10 @@ namespace OcclusionCulling
                         //        break;
                         //    }
                         //}
-                        ref var ci = ref cullingInfo.GetRefRWOptional(e).ValueRW;
-                        ci.m_Mask |= BoundsMask.NormalLayers;
-                        ci.m_Mask |= BoundsMask.Debug;
-                        ci.m_MinLod = 110;
+                        //ref var ci = ref cullingInfo.GetRefRWOptional(e).ValueRW;
+                        //ci.m_Mask |= BoundsMask.NormalLayers;
+                        //ci.m_Mask |= BoundsMask.Debug;
+                        //ci.m_MinLod = 110;
                         //var newData = new PreCullingData
                         //{
                         //    m_Entity = e,
@@ -195,6 +206,8 @@ namespace OcclusionCulling
                         //    m_UpdateFrame = -1
                         //};
                         //cullingData.Add(newData);
+                        //if (occludedTag.HasComponent(e))
+                        //    ecb.SetComponentEnabled<OcclusionDirtyTag>(e, false);
 
                         originals.Remove(e);
                     }
@@ -209,11 +222,22 @@ namespace OcclusionCulling
                     var (e,bounds) = occludedList[oi];
                     if (!enforced.Contains(e))
                     {
-                        ref var ci = ref cullingInfo.GetRefRWOptional(e).ValueRW;
-                        ci.m_MinLod = byte.MaxValue;
-                        ci.m_Mask &= ~(BoundsMask.NormalLayers | BoundsMask.Debug);
+                        if (!originals.TryGetValue(e, out var old))
+                        {
+                            //old.m_Mask |= (BoundsMask.NormalLayers | BoundsMask.Debug);
+                            old.m_MinLod = byte.MaxValue;
+                            bool success = tree.TryUpdate(e, old);
 
-                        s_log.Info($"Attempted to cull e({e.Index}) with m_Mask({ci.m_Mask})");
+                            s_log.Info($"Trying to cull e({e.Index}), masks({old.m_Mask}), minLod({old.m_MinLod}), success({success})");
+                        }
+                        //ref var ci = ref cullingInfo.GetRefRWOptional(e).ValueRW;
+                        //ci.m_MinLod = byte.MaxValue;
+                        //ci.m_Mask &= ~(BoundsMask.NormalLayers | BoundsMask.Debug);
+
+                        //s_log.Info($"Attempted to cull e({e.Index}) with m_Mask({ci.m_Mask})");
+                        //if (!occludedTag.HasComponent(e))
+                        //    ecb.AddComponent<OcclusionDirtyTag>(e, new OcclusionDirtyTag());
+                        //ecb.SetComponentEnabled<OcclusionDirtyTag>(e, true);
 
                         originals.TryAdd(e, bounds);
                         //for (int j = 0; j < cullingData.Length; j++)
