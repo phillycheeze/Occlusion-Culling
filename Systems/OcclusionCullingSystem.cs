@@ -76,16 +76,11 @@ namespace OcclusionCulling
                 // reset resume index when camera moves
                 occlusionResumeIndex = 0;
             }
-            
-            var msTimer = DateTimeOffset.Now.ToUnixTimeMilliseconds();
-            s_log.Info($"tm({msTimer}) Starting culling system: camPos({camPos}), camDir({camDir})");
 
-            JobHandle readDeps;
-            var staticTreeRW = m_SearchSystem.GetStaticSearchTree(readOnly: false, out readDeps);
+            var staticTreeRW = m_SearchSystem.GetStaticSearchTree(readOnly: false, out var readDeps);
             Dependency = JobHandle.CombineDependencies(Dependency, readDeps);
 
             var terrainData = m_TerrainSystem.GetHeightData();
-            s_log.Info($"tm({DateTimeOffset.Now.ToUnixTimeMilliseconds() - msTimer}) Starting culling system: camPos({camPos}), camDir({camDir})");
 
             int nextIndex;
             var occluded = OcclusionUtilities.FindTerrainOccludedEntities(
@@ -96,166 +91,16 @@ namespace OcclusionCulling
                 out nextIndex
             );
 
-            s_log.Info($"tm({DateTimeOffset.Now.ToUnixTimeMilliseconds() - msTimer}) Utility finished.");
-
-            // Tech: let the apply-delta job do both revert and enforce in one pass
-            // User: we’ll handle hiding and revealing all objects in the job itself
-            // Schedule writer job to apply delta and update caches
             //var cullingData = m_PreCullingSystem.GetCullingData(readOnly: false, out var writeDeps);
-            //Dependency = JobHandle.CombineDependencies(Dependency, writeDeps);
-            var ecb = new EntityCommandBuffer();
-            var deltaJob = new ApplyOcclusionDeltaJob
-            {
-                //cullingData   = cullingData,
-                occludedList  = occluded,
-                enforced      = m_EnforcedEntities,
-                originals     = m_OriginalByEntity,
-                cullingInfo   = GetComponentLookup<CullingInfo>(false),
-                occludedTag   = GetComponentLookup<OcclusionDirtyTag>(false),
-                ecb           = ecb,
-                tree          = staticTreeRW
-            };
-            
-            var handle = deltaJob.Schedule(Dependency);
-            s_log.Info($"tm({DateTimeOffset.Now.ToUnixTimeMilliseconds() - msTimer}) Delta job scheduled.");
-            var disposeHandle = occluded.Dispose(handle);
+            //Dependency = JobHandle.CombineDependencies(Dependency, writeDeps);            
 
             occlusionResumeIndex = nextIndex;
-            
-            m_SearchSystem.AddStaticSearchTreeWriter(disposeHandle);
-            // ensure PreCullingSystem waits on our delta job before next read
-            //m_PreCullingSystem.AddCullingDataReader(disposeHandle);
-            Dependency = disposeHandle;
-
-            //m_PreCullingSystem.ResetCulling();
 
             //m_PreCullingSystem.ResetCulling();
             m_LastCameraPos = camPos;
             return;
         }
 
-        // TODO: Maybe just use nativearrays for tracking entity cache, then doing a simple intersection call to generate diffs
-        private struct ApplyOcclusionDeltaJob : IJob
-        {
-            //[NativeDisableParallelForRestriction]
-            //public NativeList<PreCullingData> cullingData;
-            [ReadOnly] public NativeList<(Entity entity, QuadTreeBoundsXZ bounds)> occludedList;
-            public NativeParallelHashSet<Entity> enforced;
-            public NativeParallelHashMap<Entity, QuadTreeBoundsXZ> originals;
-            public ComponentLookup<CullingInfo> cullingInfo;
-            public ComponentLookup<OcclusionDirtyTag> occludedTag;
-            public EntityCommandBuffer ecb;
-            public NativeQuadTree<Entity, QuadTreeBoundsXZ> tree;
-
-            public void Execute()
-            {
-                // Tech: Revert entities that were hidden but are no longer in occludedList
-                // User: unhide any objects that have come back into view
-                //s_log.Info($"Inside Job.Execute: occludedListCount({occludedList.Length}, enforcedCount({enforced.Count()}, originalsCount({originals.Count()})");
-                // First pass: collect entities to unhide without mutating the set during iteration
-                var toUnhide = new NativeList<Entity>(Allocator.TempJob);
-                var enumOld = enforced.GetEnumerator();
-                while (enumOld.MoveNext())
-                {
-                    Entity e = enumOld.Current;
-                    bool stillHidden = false;
-                    // check if still occluded
-                    for (int oi = 0; oi < occludedList.Length; oi++)
-                    {
-                        if (occludedList[oi].entity.Equals(e)) { stillHidden = true; break; }
-                    }
-                    if (!stillHidden)
-                    {
-                        toUnhide.Add(e);
-                    }
-                }
-                enumOld.Dispose();
-                
-                // Perform unhide operations
-                for (int ui = 0; ui < toUnhide.Length; ui++)
-                {
-                    var e = toUnhide[ui];
-                    if (originals.TryGetValue(e, out var old))
-                {
-                        old.m_Mask |= (BoundsMask.NormalLayers | BoundsMask.Debug);
-                        
-                        bool success = tree.TryUpdate(e, old);
-                        s_log.Info($"Trying to unhide e({e.Index}), masks({old.m_Mask}), oldMinLod({old.m_MinLod}), success({success})");
-                        //for (int j = 0; j < cullingData.Length; j++)
-                        //{
-                        //    if (cullingData[j].m_Entity.Equals(e))
-                        //    {
-                        //        var data = cullingData[j];
-                        //        data.m_Flags |= PreCullingFlags.PassedCulling;
-                        //        data.m_Flags |= PreCullingFlags.Updated;
-                        //        data.m_Flags |= PreCullingFlags.NearCameraUpdated;
-                        //        data.m_Timer = 0;
-                        //        cullingData[j] = data;
-                        //        break;
-                        //    }
-                        //}
-                        //ref var ci = ref cullingInfo.GetRefRWOptional(e).ValueRW;
-                        //ci.m_Mask |= BoundsMask.NormalLayers;
-                        //ci.m_Mask |= BoundsMask.Debug;
-                        //ci.m_MinLod = 110;
-                        //var newData = new PreCullingData
-                        //{
-                        //    m_Entity = e,
-                        //    m_Flags = PreCullingFlags.PassedCulling | PreCullingFlags.Updated | PreCullingFlags.NearCameraUpdated,
-                        //    m_Timer = 0,
-                        //    m_UpdateFrame = -1
-                        //};
-                        //cullingData.Add(newData);
-                        //if (occludedTag.HasComponent(e))
-                        //    ecb.SetComponentEnabled<OcclusionDirtyTag>(e, false);
-
-                        originals.Remove(e);
-                    }
-                    enforced.Remove(e);
-                }
-                toUnhide.Dispose();
-
-                // Tech: Enforce any new occlusions not already tagged
-                // User: hide objects that just got blocked
-                for (int oi = 0; oi < occludedList.Length; oi++)
-                {
-                    var (e,bounds) = occludedList[oi];
-                    if (!enforced.Contains(e))
-                    {
-                        if (!originals.TryGetValue(e, out var old))
-                        {
-                            //old.m_Mask |= (BoundsMask.NormalLayers | BoundsMask.Debug);
-                            old.m_MinLod = byte.MaxValue;
-                            bool success = tree.TryUpdate(e, old);
-
-                            s_log.Info($"Trying to cull e({e.Index}), masks({old.m_Mask}), minLod({old.m_MinLod}), success({success})");
-                        }
-                        //ref var ci = ref cullingInfo.GetRefRWOptional(e).ValueRW;
-                        //ci.m_MinLod = byte.MaxValue;
-                        //ci.m_Mask &= ~(BoundsMask.NormalLayers | BoundsMask.Debug);
-
-                        //s_log.Info($"Attempted to cull e({e.Index}) with m_Mask({ci.m_Mask})");
-                        //if (!occludedTag.HasComponent(e))
-                        //    ecb.AddComponent<OcclusionDirtyTag>(e, new OcclusionDirtyTag());
-                        //ecb.SetComponentEnabled<OcclusionDirtyTag>(e, true);
-
-                        originals.TryAdd(e, bounds);
-                        //for (int j = 0; j < cullingData.Length; j++)
-                        //{
-                        //    if (cullingData[j].m_Entity.Equals(e))
-                        //    {
-                        //        var data = cullingData[j];
-                        //        data.m_Flags &= ~PreCullingFlags.PassedCulling;
-                        //        data.m_Timer = byte.MaxValue;
-                        //        cullingData[j] = data;
-                        //        break;
-                        //    }
-                        //}
-                        enforced.Add(e);
-                    }
-                }
-            }
-        }
     }
 }
 
