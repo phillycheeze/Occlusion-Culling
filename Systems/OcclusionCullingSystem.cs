@@ -16,15 +16,18 @@ namespace OcclusionCulling
     public partial class OcclusionCullingSystem : SystemBase
     {
         private static ILog s_log = Mod.log;
-        static readonly float kMoveThreshold= 3f;
         private CameraUpdateSystem m_CameraSystem;
         private Game.Rendering.PreCullingSystem m_PreCullingSystem;
         private Game.Objects.SearchSystem m_SearchSystem;
         private Game.Simulation.TerrainSystem m_TerrainSystem;
-        private float3 m_LastCameraPos;
-        private float2 m_LastDirXZ;
         private NativeParallelHashSet<Entity> m_EnforcedEntities;
         private NativeParallelHashMap<Entity, QuadTreeBoundsXZ> m_OriginalByEntity;
+
+        static int occlusionResumeIndex = 0;
+        static readonly float kMoveThreshold = 3f;
+        static readonly int kMaxObjectsPerFrame = 256; //low value for testing
+
+        private float3 m_LastCameraPos = float3.zero;
 
         protected override void OnCreate()
         {
@@ -33,8 +36,6 @@ namespace OcclusionCulling
             m_PreCullingSystem = World.GetExistingSystemManaged<Game.Rendering.PreCullingSystem>();
             m_SearchSystem = World.GetExistingSystemManaged<Game.Objects.SearchSystem>();
             m_TerrainSystem = World.GetExistingSystemManaged<Game.Simulation.TerrainSystem>();
-            m_LastCameraPos = float3.zero;
-            m_LastDirXZ = float2.zero;
             m_EnforcedEntities = new NativeParallelHashSet<Entity>(1024, Allocator.Persistent);
             m_OriginalByEntity = new NativeParallelHashMap<Entity, QuadTreeBoundsXZ>(1024, Allocator.Persistent);
         }
@@ -58,39 +59,36 @@ namespace OcclusionCulling
             float3 camDir = m_CameraSystem.activeViewer.forward;
 
             // Bail if you are looking straight down, occlusion culling is unneeded
-            bool lookingDown = camDir.y < -0.9f;
-            if (lookingDown) return;
-
             // Bail if the camera only moves a tiny bit, esp to prevent frequent job triggers with rapid camera movement
+            bool lookingDown = camDir.y < -0.9f;
             float2 deltaXZ = new float2(camPos.x - m_LastCameraPos.x, camPos.z - m_LastCameraPos.z);
-            bool moved = math.length(deltaXZ) > kMoveThreshold;
-            if (!moved) return;
-
-            float2 currentDirXZ = math.normalize(new float2(camDir.x, camDir.z));
-            //bool turned = math.dot(currentDirXZ, m_LastDirXZ) < 0.996f; // threshold ~5° turn
+            bool moved = math.lengthsq(deltaXZ) > (kMoveThreshold * kMoveThreshold); // Prevent square root instruction
+            if (!moved || lookingDown)
+            {
+                if (occlusionResumeIndex == 0) return;
+            }
+            else if (moved)
+            {
+                occlusionResumeIndex = 0;
+            }
             
-
             var msTimer = DateTimeOffset.Now.ToUnixTimeMilliseconds();
-            s_log.Info($"tm({msTimer}) Starting culling system: camPos({camPos}), camDir({camDir}), currentDirXZ({currentDirXZ})");
+            s_log.Info($"tm({msTimer}) Starting culling system: camPos({camPos}), camDir({camDir})");
 
-            // TODO: only have utility find XX max culling entities this frame
             JobHandle readDeps;
             var staticTreeRO = m_SearchSystem.GetStaticSearchTree(readOnly: true, out readDeps);
             Dependency = JobHandle.CombineDependencies(Dependency, readDeps);
 
             var terrainData = m_TerrainSystem.GetHeightData();
-            s_log.Info($"tm({DateTimeOffset.Now.ToUnixTimeMilliseconds() - msTimer}) Starting culling system: camPos({camPos}), camDir({camDir}), currentDirXZ({currentDirXZ})");
+            s_log.Info($"tm({DateTimeOffset.Now.ToUnixTimeMilliseconds() - msTimer}) Starting culling system: camPos({camPos}), camDir({camDir})");
 
-            // Many calculations on the main thread, not ideal
+            int nextIndex;
             var occluded = OcclusionUtilities.FindTerrainOccludedEntities(
                 staticTreeRO,
                 terrainData,
                 camPos,
                 camDir,
-                1000f,           // max distance to check
-                12,             // samples per ray
-                0.5f,           // clearance meters
-                Allocator.TempJob
+                out nextIndex
             );
 
             s_log.Info($"tm({DateTimeOffset.Now.ToUnixTimeMilliseconds() - msTimer}) Utility finished.");
@@ -110,12 +108,13 @@ namespace OcclusionCulling
             var handle = deltaJob.Schedule(combined);
             s_log.Info($"tm({DateTimeOffset.Now.ToUnixTimeMilliseconds() - msTimer}) Delta job scheduled.");
             var disposeHandle = occluded.Dispose(handle);
+
+            occlusionResumeIndex = nextIndex;
             
             m_PreCullingSystem.AddCullingDataWriter(disposeHandle);
             Dependency = disposeHandle;
 
             m_LastCameraPos = camPos;
-            m_LastDirXZ = math.normalizesafe(new float2(camDir.x, camDir.z));
             return;
         }
 
@@ -152,10 +151,10 @@ namespace OcclusionCulling
                             {
                                 if (cullingData[j].m_Entity.Equals(e))
                                 {
-                                    //var data = cullingData[j];
-                                    //data.m_Flags |= PreCullingFlags.PassedCulling;
-                                    //data.m_Timer = 0;
-                                    //cullingData[j] = data;
+                                    var data = cullingData[j];
+                                    data.m_Flags |= PreCullingFlags.PassedCulling;
+                                    data.m_Timer = 0;
+                                    cullingData[j] = data;
                                     break;
                                 }
                             }
