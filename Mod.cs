@@ -12,8 +12,7 @@ namespace OcclusionCulling
         public static ILog log = LogManager.GetLogger($"{nameof(OcclusionCulling)}.{nameof(Mod)}").SetShowsErrorsInUI(false);
         private Setting m_Setting;
         private Harmony m_Harmony;
-        
-        // Removed citizen cleanup system; occlusion-only mod
+
         public static OcclusionCullingSystem OcclusionSystem { get; private set; }
         public void OnLoad(UpdateSystem updateSystem)
         {

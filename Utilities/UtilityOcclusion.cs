@@ -7,7 +7,8 @@ using Colossal.Mathematics;
 using Game.Rendering;
 using Colossal.Logging;
 using Game.Simulation;
-using UnityEngine;
+using Game.Objects;
+using Game.Prefabs;
 
 namespace OcclusionCulling
 {
@@ -15,9 +16,26 @@ namespace OcclusionCulling
     {
         private static ILog s_log = Mod.log;
         private static float maxProcessingDistance = 1000f;
-        private static float maxObjectOccluderThresholdDistance = 100f; // Skip object "shadow" casters after a certain distance since their shadows are too small anyways
+        private static float maxObjectOccluderThresholdDistance = 200f; // Skip object "shadow" casters after a certain distance since their shadows are too small anyways
         private static int samplesPerRay = 12;
         private static float clearanceMeters = 0.5f;
+        private static EntityManager entityManager;
+
+        private static QuadTreeBoundsXZ GetTrueGeometryBounds(Entity e, QuadTreeBoundsXZ bounds)
+        {
+            if(entityManager.HasComponent<PrefabRef>(e))
+            {
+                PrefabRef pr = entityManager.GetComponentData<PrefabRef>(e);
+                if (entityManager.HasComponent<ObjectGeometryData>(e))
+                {
+                    ObjectGeometryData geo = entityManager.GetComponentData<ObjectGeometryData>(e);
+                    Transform t = entityManager.GetComponentData<Transform>(e);
+                    var realBoundary = ObjectUtils.CalculateBounds(t.m_Position, t.m_Rotation, geo);
+                    return new QuadTreeBoundsXZ(realBoundary, BoundsMask.AllLayers, bounds.m_MinLod);
+                }
+            }
+            return bounds;
+        }
 
         // TODO:
         //   1. Switch to NativeQuadTrees instead of NativeLists sets for candidates result, then re-use that for occlusion testing
@@ -27,12 +45,14 @@ namespace OcclusionCulling
 			TerrainHeightData terrainHeight,
 			float3 cameraPosition,
 			float3 cameraDirection,
+            EntityManager em,
             out int nextIndex,
-            Allocator allocator = Allocator.TempJob,
+            Allocator allocator = Allocator.Temp,
             int startIndex = 0,
             int maxResults = int.MaxValue
         )
 		{
+            entityManager = em;
             nextIndex = startIndex;
 
             var collector = new CandidateCollector(cameraPosition, cameraDirection, maxProcessingDistance);
@@ -49,14 +69,16 @@ namespace OcclusionCulling
 
             for (int ci = startIndex; ci < collector.candidates.Length; ci++)
             {
-                var (entity, bounds) = collector.candidates[ci];
+                var (entity, largeBounds) = collector.candidates[ci];
+                var bounds = GetTrueGeometryBounds( entity, largeBounds );
+                
                 float3 center3  = (bounds.m_Bounds.min + bounds.m_Bounds.max) * 0.5f;
                 float2 centerXZ = new float2(center3.x, center3.z);
                 float dist      = math.distance(camXZ, centerXZ);
                 float distSq = dist * dist; // Prevent inefficient square root math
 
                 // Skip if distance is really close, no need to cull
-                if (dist < 20f) continue;
+                if (dist < 30f) continue;
 
                 float2 dir = (centerXZ - camXZ) / dist;
                 float objectTopY = bounds.m_Bounds.max.y;
@@ -125,8 +147,6 @@ namespace OcclusionCulling
                 if (hidden)
                 {
                     result.Add((entity, bounds));
-                    //bounds.m_MinLod = byte.MaxValue;
-                    //quadTree.TryUpdate(entity, bounds);
 
                     // Stop processing bc we hit max results
                     if (result.Length >= maxResults)
@@ -201,15 +221,23 @@ namespace OcclusionCulling
                 return nodeBounds.Intersect(searchRegion);
             }
 
-            public void Iterate(QuadTreeBoundsXZ bounds, Entity item)
+            public void Iterate(QuadTreeBoundsXZ largeBounds, Entity item)
             {
                 if (count >= maxCount) return;
-
+                
+                // Use large, more efficient bounds in the Intersection above, 
+                // now narrow down to true occluder geometry size
+                var bounds = GetTrueGeometryBounds(item, largeBounds);
+                if (!bounds.Intersect(searchRegion))
+                {
+                    // Didn't succeed in tighter filtering checking of true geometry
+                    return;
+                }
                 var objectSize = (bounds.m_Bounds.max - bounds.m_Bounds.min);
                 var minDimension = math.min(math.min(objectSize.x, objectSize.y), objectSize.z);
                 var maxDimension = math.max(math.max(objectSize.x, objectSize.y), objectSize.z);
 
-                if (minDimension > 10f && maxDimension > 20f)
+                if (minDimension > 8f && maxDimension > 15f)
                 {
                     results.Add((item, bounds));
                     count++;

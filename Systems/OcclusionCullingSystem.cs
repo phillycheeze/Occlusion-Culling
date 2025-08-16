@@ -96,37 +96,41 @@ namespace OcclusionCulling
                 }
             }
 
-            var staticTreeRW = m_SearchSystem.GetStaticSearchTree(readOnly: false, out var readDeps);
+            long timer = DateTimeOffset.Now.ToUnixTimeMilliseconds();
+
+            var staticTreeRO = m_SearchSystem.GetStaticSearchTree(readOnly: true, out var readDeps);
             Dependency = JobHandle.CombineDependencies(Dependency, readDeps);
 
             var terrainData = m_TerrainSystem.GetHeightData();
 
             var occluded = OcclusionUtilities.FindTerrainOccludedEntities(
-                staticTreeRW,
+                staticTreeRO,
                 terrainData,
                 camPos,
                 camDir,
+                this.EntityManager,
                 out var nextIndex
             );
 
             NativeHashSet<Entity> toUnCull = new NativeHashSet<Entity>(occluded.Length, Allocator.Temp);
             NativeHashSet<Entity> toTriggerCull = new NativeHashSet<Entity>(occluded.Length, Allocator.Temp);
-            NativeHashSet<Entity> toUndirty = new NativeHashSet<Entity>(occluded.Length, Allocator.Temp);
+            NativeHashSet<Entity> toUndirty = new NativeHashSet<Entity>(m_dirtiedEntities.Count, Allocator.Temp);
 
             // Copy dirtyEntities to reset later
             foreach(Entity e in m_dirtiedEntities)
             {
                 toUndirty.Add(e);
             }
-            m_dirtiedEntities.Dispose();
+            m_dirtiedEntities.Clear();
 
             // Un-cull anything that isn't present this frame but was last frame
             foreach (var item in m_cachedCulls)
             {
+                Entity e = item.Key;
                 bool culledAgain = false;
                 for (int j = 0; j < occluded.Length; j++)
                 {
-                    if (occluded[j].entity.Equals(m_cachedCulls[item.Key]))
+                    if (occluded[j].entity.Equals(e))
                     {
                         culledAgain = true;
                         break;
@@ -135,18 +139,19 @@ namespace OcclusionCulling
 
                 if (!culledAgain)
                 {
-                    toUnCull.Add(item.Key);
+                    toUnCull.Add(e);
                 }
             }
 
             // Trigger new cull unless was culled in previous actionable frame
             foreach ((Entity e, QuadTreeBoundsXZ b) in occluded)
             {
-                if (m_cachedCulls.TryGetValue(e, out var cc))
+                if (m_cachedCulls.ContainsKey(e))
                 {
                     continue;
                 }
                 toTriggerCull.Add(e);
+                m_cachedCulls.TryAdd(e, b);
             }
 
             // Perform culling
@@ -172,7 +177,6 @@ namespace OcclusionCulling
 
                     EntityManager.SetComponentData(e, ci);
                     revertedCount++;
-                    s_log.Info($"Need to uncull: entity({e.Index}). The new mask is {ci.m_Mask}");
                     m_cachedCulls.Remove(e);
                 }
             }
@@ -191,17 +195,12 @@ namespace OcclusionCulling
 
             if (enforcedCount > 0 || revertedCount > 0)
             {
-                //m_PreCullingSystem.ResetCulling();
+                s_log.Info($"OnUpdate: enforcedCulls:{enforcedCount}, revertedCulls:{revertedCount}, totalFound:{occluded.Length}, previousBatchIndex:{occlusionResumeIndex}, timeInMs:{DateTimeOffset.Now.ToUnixTimeMilliseconds() - timer}");
             }
 
-
-            occluded.Dispose();
-            //var cullingData = m_PreCullingSystem.GetCullingData(readOnly: false, out var writeDeps);
-            //Dependency = JobHandle.CombineDependencies(Dependency, writeDeps);            
+            occluded.Dispose();         
 
             occlusionResumeIndex = nextIndex;
-
-            //m_PreCullingSystem.ResetCulling();
             m_LastCameraPos = camPos;
             return;
         }
