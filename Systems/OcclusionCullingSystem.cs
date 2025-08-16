@@ -22,7 +22,8 @@ namespace OcclusionCulling
         private Game.Rendering.PreCullingSystem m_PreCullingSystem;
         private Game.Objects.SearchSystem m_SearchSystem;
         private Game.Simulation.TerrainSystem m_TerrainSystem;
-        private NativeParallelHashMap<Entity, QuadTreeBoundsXZ> m_OriginalByEntity;
+        private NativeHashMap<Entity, QuadTreeBoundsXZ> m_cachedCulls;
+        private NativeHashSet<Entity> m_dirtiedEntities;
 
         static int occlusionResumeIndex = 0;
         static readonly float kMoveThreshold = 3f;
@@ -37,15 +38,30 @@ namespace OcclusionCulling
             m_PreCullingSystem = World.GetExistingSystemManaged<Game.Rendering.PreCullingSystem>();
             m_SearchSystem = World.GetExistingSystemManaged<Game.Objects.SearchSystem>();
             m_TerrainSystem = World.GetExistingSystemManaged<Game.Simulation.TerrainSystem>();
-            m_OriginalByEntity = new NativeParallelHashMap<Entity, QuadTreeBoundsXZ>(1024, Allocator.Persistent);
+            m_cachedCulls = new NativeHashMap<Entity, QuadTreeBoundsXZ>(1024, Allocator.Persistent);
+            m_dirtiedEntities = new NativeHashSet<Entity>(1024, Allocator.Persistent);
         }
 
         protected override void OnDestroy()
         {
-            if (m_OriginalByEntity.IsCreated) m_OriginalByEntity.Dispose();
+            if (m_cachedCulls.IsCreated) m_cachedCulls.Dispose();
             base.OnDestroy();
         }
 
+        protected void markDirty(Entity e)
+        {
+            if (m_dirtiedEntities.Contains(e)) return;
+            if (!EntityManager.HasComponent<OcclusionDirtyTag>(e))
+                EntityManager.AddComponent<OcclusionDirtyTag>(e);
+            EntityManager.SetComponentEnabled<OcclusionDirtyTag>(e, true);
+            m_dirtiedEntities.Add(e);
+        }
+
+        protected void removeDirty(Entity e)
+        {
+            EntityManager.SetComponentEnabled<OcclusionDirtyTag>(e, false);
+            m_dirtiedEntities.Remove(e);
+        }
         protected override void OnUpdate()
         {
             // Bail if the camera system isn't ready
@@ -92,26 +108,92 @@ namespace OcclusionCulling
                 camDir,
                 out var nextIndex
             );
-            
-            for ( int i = 0; i < occluded.Length; i++)
+
+            NativeHashSet<Entity> toUnCull = new NativeHashSet<Entity>(occluded.Length, Allocator.Temp);
+            NativeHashSet<Entity> toTriggerCull = new NativeHashSet<Entity>(occluded.Length, Allocator.Temp);
+            NativeHashSet<Entity> toUndirty = new NativeHashSet<Entity>(occluded.Length, Allocator.Temp);
+
+            // Copy dirtyEntities to reset later
+            foreach(Entity e in m_dirtiedEntities)
             {
-                var (e,b) = occluded[i];
+                toUndirty.Add(e);
+            }
+            m_dirtiedEntities.Dispose();
+
+            // Un-cull anything that isn't present this frame but was last frame
+            foreach (var item in m_cachedCulls)
+            {
+                bool culledAgain = false;
+                for (int j = 0; j < occluded.Length; j++)
+                {
+                    if (occluded[j].entity.Equals(m_cachedCulls[item.Key]))
+                    {
+                        culledAgain = true;
+                        break;
+                    }
+                }
+
+                if (!culledAgain)
+                {
+                    toUnCull.Add(item.Key);
+                }
+            }
+
+            // Trigger new cull unless was culled in previous actionable frame
+            foreach ((Entity e, QuadTreeBoundsXZ b) in occluded)
+            {
+                if (m_cachedCulls.TryGetValue(e, out var cc))
+                {
+                    continue;
+                }
+                toTriggerCull.Add(e);
+            }
+
+            // Perform culling
+            int enforcedCount = 0;
+            foreach (var e in toTriggerCull) 
+            {
+                markDirty(e);
                 var ci = EntityManager.GetComponentData<CullingInfo>(e);
                 ci.m_Mask = 0;
                 EntityManager.SetComponentData(e, ci);
-                if (!EntityManager.HasComponent<OcclusionDirtyTag>(e))
-                    EntityManager.AddComponent<OcclusionDirtyTag>(e);
-                EntityManager.SetComponentEnabled<OcclusionDirtyTag>(e, true);
+                enforcedCount++;
             }
 
-            for (int i = 0; i < m_OriginalByEntity.Count(); i++)
+            // Perform unculling
+            int revertedCount = 0;
+            foreach (Entity e in toUnCull)
             {
-                // If not in occluded this frame
+                if (m_cachedCulls.TryGetValue(e, out var bounds))
+                {
+                    markDirty(e);
+                    var ci = EntityManager.GetComponentData<CullingInfo>(e);
+                    ci.m_Mask = bounds.m_Mask;
+
+                    EntityManager.SetComponentData(e, ci);
+                    revertedCount++;
+                    s_log.Info($"Need to uncull: entity({e.Index}). The new mask is {ci.m_Mask}");
+                    m_cachedCulls.Remove(e);
+                }
+            }
+
+            // Resync dirtiedEntities from last actionable frame
+            foreach (Entity e in toUndirty)
+            {
+                if(m_dirtiedEntities.Contains(e))
+                {
+                    continue;
+                }
+                // Previous dirtied is no longer dirty, so let's remove it
+                removeDirty(e);
             }
 
 
-            if(occluded.Length > 0)
-                m_PreCullingSystem.ResetCulling();
+            if (enforcedCount > 0 || revertedCount > 0)
+            {
+                //m_PreCullingSystem.ResetCulling();
+            }
+
 
             occluded.Dispose();
             //var cullingData = m_PreCullingSystem.GetCullingData(readOnly: false, out var writeDeps);
