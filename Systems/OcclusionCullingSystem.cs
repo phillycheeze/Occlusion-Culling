@@ -22,7 +22,6 @@ namespace OcclusionCulling
         private Game.Rendering.PreCullingSystem m_PreCullingSystem;
         private Game.Objects.SearchSystem m_SearchSystem;
         private Game.Simulation.TerrainSystem m_TerrainSystem;
-        private NativeParallelHashSet<Entity> m_EnforcedEntities;
         private NativeParallelHashMap<Entity, QuadTreeBoundsXZ> m_OriginalByEntity;
 
         static int occlusionResumeIndex = 0;
@@ -38,13 +37,11 @@ namespace OcclusionCulling
             m_PreCullingSystem = World.GetExistingSystemManaged<Game.Rendering.PreCullingSystem>();
             m_SearchSystem = World.GetExistingSystemManaged<Game.Objects.SearchSystem>();
             m_TerrainSystem = World.GetExistingSystemManaged<Game.Simulation.TerrainSystem>();
-            m_EnforcedEntities = new NativeParallelHashSet<Entity>(1024, Allocator.Persistent);
             m_OriginalByEntity = new NativeParallelHashMap<Entity, QuadTreeBoundsXZ>(1024, Allocator.Persistent);
         }
 
         protected override void OnDestroy()
         {
-            if (m_EnforcedEntities.IsCreated) m_EnforcedEntities.Dispose();
             if (m_OriginalByEntity.IsCreated) m_OriginalByEntity.Dispose();
             base.OnDestroy();
         }
@@ -64,17 +61,23 @@ namespace OcclusionCulling
             bool lookingDown = camDir.y < -0.9f;
             float2 deltaXZ = new float2(camPos.x - m_LastCameraPos.x, camPos.z - m_LastCameraPos.z);
             bool moved = math.lengthsq(deltaXZ) > (kMoveThreshold * kMoveThreshold);
-            bool hasPending = m_EnforcedEntities.Count() > 0 || m_OriginalByEntity.Count() > 0;
-            if (lookingDown || (!moved && !hasPending))
+
+            // If we aren't in the middle of a batch
+            if (occlusionResumeIndex == 0)
             {
-                // Nothing to do, update last camera state and return
-                m_LastCameraPos = camPos;
-                return;
+                //Bail if camera hasn't moved or looking downward
+                if(lookingDown || !moved)
+                {
+                    return;
+                }
             }
-            if (moved)
+            else
             {
-                // reset resume index when camera moves
-                occlusionResumeIndex = 0;
+                // We are in the middle of a batch, but reset batch if we moved
+                if (moved)
+                {
+                    occlusionResumeIndex = 0;
+                }
             }
 
             var staticTreeRW = m_SearchSystem.GetStaticSearchTree(readOnly: false, out var readDeps);
@@ -82,15 +85,35 @@ namespace OcclusionCulling
 
             var terrainData = m_TerrainSystem.GetHeightData();
 
-            int nextIndex;
             var occluded = OcclusionUtilities.FindTerrainOccludedEntities(
                 staticTreeRW,
                 terrainData,
                 camPos,
                 camDir,
-                out nextIndex
+                out var nextIndex
             );
+            
+            for ( int i = 0; i < occluded.Length; i++)
+            {
+                var (e,b) = occluded[i];
+                var ci = EntityManager.GetComponentData<CullingInfo>(e);
+                ci.m_Mask = 0;
+                EntityManager.SetComponentData(e, ci);
+                if (!EntityManager.HasComponent<OcclusionDirtyTag>(e))
+                    EntityManager.AddComponent<OcclusionDirtyTag>(e);
+                EntityManager.SetComponentEnabled<OcclusionDirtyTag>(e, true);
+            }
 
+            for (int i = 0; i < m_OriginalByEntity.Count(); i++)
+            {
+                // If not in occluded this frame
+            }
+
+
+            if(occluded.Length > 0)
+                m_PreCullingSystem.ResetCulling();
+
+            occluded.Dispose();
             //var cullingData = m_PreCullingSystem.GetCullingData(readOnly: false, out var writeDeps);
             //Dependency = JobHandle.CombineDependencies(Dependency, writeDeps);            
 
