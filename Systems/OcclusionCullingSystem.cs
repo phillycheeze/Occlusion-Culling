@@ -58,17 +58,21 @@ namespace OcclusionCulling
             float3 camPos = lodParams.cameraPosition;
             float3 camDir = m_CameraSystem.activeViewer.forward;
 
-            // Bail if you are looking straight down, occlusion culling is unneeded
-            // Bail if the camera only moves a tiny bit, esp to prevent frequent job triggers with rapid camera movement
+            // Bail out if looking straight down, or if camera hasn't moved and there are no pending hide/unhide operations
             bool lookingDown = camDir.y < -0.9f;
             float2 deltaXZ = new float2(camPos.x - m_LastCameraPos.x, camPos.z - m_LastCameraPos.z);
-            bool moved = math.lengthsq(deltaXZ) > (kMoveThreshold * kMoveThreshold); // Prevent square root instruction
-            if (!moved || lookingDown)
+            bool moved = math.lengthsq(deltaXZ) > (kMoveThreshold * kMoveThreshold);
+            bool hasPending = m_EnforcedEntities.Count() > 0 || m_OriginalByEntity.Count() > 0;
+            if (lookingDown || (!moved && !hasPending))
             {
-                if (occlusionResumeIndex == 0) return;
+                // Nothing to do, update last camera state and return
+                m_LastCameraPos = camPos;
+                m_LastDirXZ = math.normalizesafe(new float2(camDir.x, camDir.z));
+                return;
             }
-            else if (moved)
+            if (moved)
             {
+                // reset resume index when camera moves
                 occlusionResumeIndex = 0;
             }
             
@@ -112,6 +116,8 @@ namespace OcclusionCulling
             occlusionResumeIndex = nextIndex;
             
             m_PreCullingSystem.AddCullingDataWriter(disposeHandle);
+            // ensure PreCullingSystem waits on our delta job before next read
+            m_PreCullingSystem.AddCullingDataReader(disposeHandle);
             Dependency = disposeHandle;
 
             m_LastCameraPos = camPos;
@@ -132,38 +138,48 @@ namespace OcclusionCulling
                 // Tech: Revert entities that were hidden but are no longer in occludedList
                 // User: unhide any objects that have come back into view
                 s_log.Info($"Inside Job.Execute: occludedListCount({occludedList.Length}, enforcedCount({enforced.Count()}, originalsCount({originals.Count()})");
+                // First pass: collect entities to unhide without mutating the set during iteration
+                var toUnhide = new NativeList<Entity>(Allocator.Temp);
                 var enumOld = enforced.GetEnumerator();
                 while (enumOld.MoveNext())
                 {
                     Entity e = enumOld.Current;
                     bool stillHidden = false;
-                    // check if in occludedList
+                    // check if still occluded
                     for (int oi = 0; oi < occludedList.Length; oi++)
                     {
                         if (occludedList[oi].entity.Equals(e)) { stillHidden = true; break; }
                     }
                     if (!stillHidden)
                     {
-                        if (originals.TryGetValue(e, out var origBounds))
-                        {
-                            // restore pass flags
-                            for (int j = 0; j < cullingData.Length; j++)
-                            {
-                                if (cullingData[j].m_Entity.Equals(e))
-                                {
-                                    var data = cullingData[j];
-                                    data.m_Flags |= PreCullingFlags.PassedCulling;
-                                    data.m_Timer = 0;
-                                    cullingData[j] = data;
-                                    break;
-                                }
-                            }
-                            originals.Remove(e);
-                        }
-                        enforced.Remove(e);
+                        toUnhide.Add(e);
                     }
                 }
                 enumOld.Dispose();
+                
+                // Perform unhide operations
+                for (int ui = 0; ui < toUnhide.Length; ui++)
+                {
+                    var e = toUnhide[ui];
+                    if (originals.TryGetValue(e, out var origBounds))
+                    {
+                        // restore pass flags
+                        for (int j = 0; j < cullingData.Length; j++)
+                        {
+                            if (cullingData[j].m_Entity.Equals(e))
+                            {
+                                var data = cullingData[j];
+                                data.m_Flags |= PreCullingFlags.PassedCulling;
+                                data.m_Timer = 0;
+                                cullingData[j] = data;
+                                break;
+                            }
+                        }
+                        originals.Remove(e);
+                    }
+                    enforced.Remove(e);
+                }
+                toUnhide.Dispose();
 
                 // Tech: Enforce any new occlusions not already tagged
                 // User: hide objects that just got blocked
