@@ -1,11 +1,11 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿using System.Collections.Generic;
+using System.Reflection;
+using System.Reflection.Emit;
+using Unity.Mathematics;
 using HarmonyLib;
 using Game.Rendering;
 using Unity.Entities;
+using UnityEngine.Rendering;
 
 namespace OcclusionCulling
 {
@@ -21,7 +21,7 @@ namespace OcclusionCulling
         }
     }
 
-    [HarmonyPatch(typeof(PreCullingSystem), nameof(PreCullingSystem.OnUpdate))]
+    [HarmonyPatch(typeof(PreCullingSystem), "OnUpdates")]
     static class PreCullingLODScalePatch
     {
         static readonly MethodInfo Orig = AccessTools.Method(
@@ -45,6 +45,8 @@ namespace OcclusionCulling
                 yield return instr;
             }
         }
+
+
 
         public static float4 ScaleLodParameters(float lodFactor, LODParameters p)
         {
