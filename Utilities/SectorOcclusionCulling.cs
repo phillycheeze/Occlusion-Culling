@@ -70,7 +70,7 @@ namespace OcclusionCulling
             };
 
             // prepare a reusable list for object occluders
-            var occluders = new NativeList<(Entity, QuadTreeBoundsXZ)>(maxOccluders, Allocator.Temp);
+            var occluders = new NativeList<CullingCandidate>(maxOccluders, Allocator.Temp);
             float2 forwardXZ = math.normalizesafe(new float2(cameraForward.x, cameraForward.z), new float2(0f, 1f));
             float halfFovRad = math.radians(fovDegrees) * 0.5f;
             var sampleBounds = new Bounds3(default, default);
@@ -109,8 +109,8 @@ namespace OcclusionCulling
                         quadTree.Iterate(ref rq, 0);
                         for (int k = 0; k < occluders.Length; k++)
                         {
-                            var (_, occBounds) = occluders[k];
-                            maxHeight = math.max(maxHeight, occBounds.m_Bounds.max.y);
+                            var occ = occluders[k];
+                            maxHeight = math.max(maxHeight, occ.bounds.m_Bounds.max.y);
                         }
                     }
                     map.heights[idx] = maxHeight;
@@ -175,7 +175,7 @@ namespace OcclusionCulling
             return result;
         }
 
-        [StructLayout(LayoutKind.Sequential)]
+        //[StructLayout(LayoutKind.Sequential)]
         public struct CullingCandidate
         {
             public Entity entity;

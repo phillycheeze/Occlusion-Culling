@@ -30,6 +30,7 @@ namespace OcclusionCulling
         static readonly int kMaxObjectsPerFrame = 256; //low value for testing
 
         private float3 m_LastCameraPos = float3.zero;
+        private bool resetCache = true;
 
         protected override void OnCreate()
         {
@@ -40,6 +41,14 @@ namespace OcclusionCulling
             m_TerrainSystem = World.GetExistingSystemManaged<Game.Simulation.TerrainSystem>();
             m_cachedCulls = new NativeHashMap<Entity, QuadTreeBoundsXZ>(1024, Allocator.Persistent);
             m_dirtiedEntities = new NativeHashSet<Entity>(1024, Allocator.Persistent);
+        }
+
+        protected override void OnStartRunning()
+        {
+            s_log.Info(nameof(OnStartRunning));
+            if (m_cachedCulls.Count > 0) m_cachedCulls.Clear();
+            if (m_dirtiedEntities.Count > 0) m_dirtiedEntities.Clear();
+            base.OnStartRunning();
         }
 
         protected override void OnDestroy()
@@ -158,7 +167,6 @@ namespace OcclusionCulling
             foreach (var item in occluded)
             {
                 Entity e = item.entity;
-                s_log.Info($"entity debug: {e.Index}");
                 QuadTreeBoundsXZ b = item.bounds;
                 if (m_cachedCulls.ContainsKey(e))
                 {

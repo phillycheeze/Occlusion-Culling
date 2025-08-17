@@ -214,7 +214,7 @@ namespace OcclusionCulling
         public struct RegionQueryCollector : INativeQuadTreeIterator<Entity, QuadTreeBoundsXZ>
         {
             public QuadTreeBoundsXZ searchRegion;
-            public NativeList<(Entity, QuadTreeBoundsXZ)> results;
+            public NativeList<SectorOcclusionCulling.CullingCandidate> results;
             public int maxCount;
 
             private int count;
@@ -242,7 +242,10 @@ namespace OcclusionCulling
 
                 if (minDimension > 8f && maxDimension > 15f)
                 {
-                    results.Add((item, bounds));
+                    var can = new SectorOcclusionCulling.CullingCandidate();
+                    can.entity = item;
+                    can.bounds = bounds;
+                    results.Add(can);
                     count++;
                 }
             }
