@@ -45,6 +45,8 @@ namespace OcclusionCulling
         protected override void OnDestroy()
         {
             if (m_cachedCulls.IsCreated) m_cachedCulls.Dispose();
+            if (m_dirtiedEntities.IsCreated) m_dirtiedEntities.Dispose();
+            s_log.Info("OnDestroy()");
             base.OnDestroy();
         }
 
@@ -100,17 +102,26 @@ namespace OcclusionCulling
 
             var staticTreeRO = m_SearchSystem.GetStaticSearchTree(readOnly: true, out var readDeps);
             Dependency = JobHandle.CombineDependencies(Dependency, readDeps);
-
             var terrainData = m_TerrainSystem.GetHeightData();
 
-            var occluded = OcclusionUtilities.FindTerrainOccludedEntities(
+            //var occluded = OcclusionUtilities.FindTerrainOccludedEntities(
+            //    staticTreeRO,
+            //    terrainData,
+            //    camPos,
+            //    camDir,
+            //    this.EntityManager,
+            //    out var nextIndex
+            //);
+            var occluded = SectorOcclusionCulling.CullByRadialMap(
                 staticTreeRO,
+                this.EntityManager,
                 terrainData,
                 camPos,
                 camDir,
-                this.EntityManager,
                 out var nextIndex
             );
+
+            s_log.Info($"Found {occluded.Length} objects to occlude");
 
             NativeHashSet<Entity> toUnCull = new NativeHashSet<Entity>(occluded.Length, Allocator.Temp);
             NativeHashSet<Entity> toTriggerCull = new NativeHashSet<Entity>(occluded.Length, Allocator.Temp);
@@ -144,8 +155,11 @@ namespace OcclusionCulling
             }
 
             // Trigger new cull unless was culled in previous actionable frame
-            foreach ((Entity e, QuadTreeBoundsXZ b) in occluded)
+            foreach (var item in occluded)
             {
+                Entity e = item.entity;
+                s_log.Info($"entity debug: {e.Index}");
+                QuadTreeBoundsXZ b = item.bounds;
                 if (m_cachedCulls.ContainsKey(e))
                 {
                     continue;
@@ -158,6 +172,11 @@ namespace OcclusionCulling
             int enforcedCount = 0;
             foreach (var e in toTriggerCull) 
             {
+                if (!EntityManager.Exists(e))
+                {
+                    s_log.Info($"Error: toCull entity no longer exists: {e.Index}");
+                    continue;
+                }
                 markDirty(e);
                 var ci = EntityManager.GetComponentData<CullingInfo>(e);
                 ci.m_Mask = 0;
@@ -171,6 +190,11 @@ namespace OcclusionCulling
             {
                 if (m_cachedCulls.TryGetValue(e, out var bounds))
                 {
+                    if(!EntityManager.Exists(e))
+                    {
+                        s_log.Info($"Error: unculling entity no longer exists: {e.Index}");
+                        continue;
+                    }
                     markDirty(e);
                     var ci = EntityManager.GetComponentData<CullingInfo>(e);
                     ci.m_Mask = bounds.m_Mask;

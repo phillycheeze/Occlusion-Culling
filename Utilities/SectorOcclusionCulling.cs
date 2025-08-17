@@ -6,6 +6,11 @@ using Colossal.Mathematics;
 using Game.Simulation;
 using Unity.Burst;
 using Unity.Jobs;
+using Game.Common;
+using System.Runtime.InteropServices;
+using Colossal.Logging;
+using Game.Buildings;
+using System.Collections.Generic;
 
 namespace OcclusionCulling
 {
@@ -119,7 +124,7 @@ namespace OcclusionCulling
         /// <summary>
         /// Perform occlusion culling using the radial height map.
         /// </summary>
-        public static NativeList<(Entity entity, QuadTreeBoundsXZ bounds)> CullByRadialMap(
+        public static NativeList<CullingCandidate> CullByRadialMap(
             NativeQuadTree<Entity, QuadTreeBoundsXZ> quadTree,
             EntityManager entityManager,
             TerrainHeightData terrainHeight,
@@ -137,18 +142,19 @@ namespace OcclusionCulling
             int startIndex = 0,
             int maxResults = int.MaxValue)
         {
+            Mod.log.Info($"SectorCulling: starting cullbyradialmap");
             // initialize and route EntityManager for queries
             OcclusionUtilities.entityManager = entityManager;
             // pagination start
             nextIndex = startIndex;
             // Build horizon map
             var map = BuildRadialHeightMap(quadTree, entityManager, terrainHeight, cameraPosition, cameraForward, fovDegrees, sectorCount, binCount, maxDistance, clearanceMeters, allocator, occluderMaxDistance, maxOccluders);
-
+            Mod.log.Info($"SectorCulling: completed radial map, sample: {map.heights[0]}, sampleLast: {map.heights[map.heights.Length - 1]}");
             // Gather candidates using existing collector
             var collector = new OcclusionUtilities.CandidateCollector(cameraPosition, cameraForward, maxDistance);
             quadTree.Iterate(ref collector, 0);
 
-            var result = new NativeList<(Entity, QuadTreeBoundsXZ)>(allocator);
+            var result = new NativeList<CullingCandidate>(allocator);
             // Schedule and execute the burst-backed culling job
             var handle = ScheduleCullBySectorJob(
                 collector.candidates,
@@ -159,6 +165,8 @@ namespace OcclusionCulling
                 result,
                 batchSize: 256,
                 dependency: default);
+
+            Mod.log.Info($"SectorCulling: Job completed, {result.Length} results found");
             handle.Complete();
             // Cleanup
             map.Dispose();
@@ -166,12 +174,19 @@ namespace OcclusionCulling
             nextIndex = 0;
             return result;
         }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct CullingCandidate
+        {
+            public Entity entity;
+            public QuadTreeBoundsXZ bounds;
+        }
         
         // Burst job for parallel sector culling
-        [BurstCompile]
+        //[BurstCompile]
         public struct CullBySectorJob : IJobParallelFor
         {
-            [ReadOnly] public NativeArray<(Entity entity, QuadTreeBoundsXZ bounds)> candidates;
+            [ReadOnly] public NativeArray<CullingCandidate> candidates;
             [ReadOnly] public NativeArray<float> heights;
             [ReadOnly] public int sectorCount;
             [ReadOnly] public int binCount;
@@ -180,7 +195,7 @@ namespace OcclusionCulling
             [ReadOnly] public float2 camXZ;
             [ReadOnly] public float2 forwardXZ;
             [ReadOnly] public float clearance;
-            public NativeList<(Entity entity, QuadTreeBoundsXZ bounds)>.ParallelWriter results;
+            public NativeList<CullingCandidate>.ParallelWriter results;
 
             public void Execute(int index)
             {
@@ -196,6 +211,10 @@ namespace OcclusionCulling
                 // normalize to [-π,π]
                 if (angle < -math.PI) angle += math.PI * 2;
                 else if (angle > math.PI) angle -= math.PI * 2;
+                if (index == 1)
+                {
+                    Mod.log.Info($"SectorCulling: sampledCandidateLoop. entity({entity.Index}), center({center}), objXZ({objXZ}), dist({dist}), angle({angle}), halfFovRad({halfFovRad})");
+                }
                 if (math.abs(angle) > halfFovRad) return;
                 int sector = math.clamp((int)((angle + halfFovRad) / (2 * halfFovRad) * sectorCount), 0, sectorCount - 1);
                 int bin = math.clamp((int)(dist / distanceStep), 0, binCount - 1);
@@ -212,17 +231,19 @@ namespace OcclusionCulling
         /// Schedule the sector-culling job as an IJobParallelFor.
         /// </summary>
         public static JobHandle ScheduleCullBySectorJob(
-            NativeList<(Entity entity, QuadTreeBoundsXZ bounds)> candidateList,
+            NativeList<CullingCandidate> candidateList,
             RadialHeightMap map,
             float3 cameraPosition,
             float3 cameraForward,
             float fovDegrees,
-            NativeList<(Entity entity, QuadTreeBoundsXZ bounds)> resultList,
+            NativeList<CullingCandidate> resultList,
             int batchSize,
             JobHandle dependency)
         {
             // prepare inputs and output writer
-            var candidates = candidateList.AsDeferredJobArray();
+            int count = candidateList.Length;
+            var candidates = candidateList.AsArray();
+            Mod.log.Info($"SectorCullingScheduler: {candidates.Length} vs {candidateList.Length}");
             resultList.Clear();
             var writer = resultList.AsParallelWriter();
             float2 camXZ = new float2(cameraPosition.x, cameraPosition.z);
