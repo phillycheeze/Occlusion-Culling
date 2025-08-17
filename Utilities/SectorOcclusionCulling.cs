@@ -11,6 +11,9 @@ using System.Runtime.InteropServices;
 using Colossal.Logging;
 using Game.Buildings;
 using System.Collections.Generic;
+using UnityEngine.Rendering;
+using Colossal.Internal.Gizmos;
+using Game.Rendering;
 
 namespace OcclusionCulling
 {
@@ -25,6 +28,7 @@ namespace OcclusionCulling
         public struct RadialHeightMap
         {
             public NativeArray<float> heights;
+            public NativeHashSet<float3> points;
             public int sectorCount;
             public int binCount;
             public float maxDistance;
@@ -35,6 +39,7 @@ namespace OcclusionCulling
             public void Dispose()
             {
                 if (heights.IsCreated) heights.Dispose();
+                if (points.IsCreated) points.Dispose();
             }
         }
 
@@ -61,6 +66,7 @@ namespace OcclusionCulling
             var map = new RadialHeightMap
             {
                 heights = new NativeArray<float>(sectorCount * binCount, allocator, NativeArrayOptions.ClearMemory),
+                points = new NativeHashSet<float3>(1, allocator),
                 sectorCount = sectorCount,
                 binCount = binCount,
                 maxDistance = maxDistance,
@@ -74,6 +80,7 @@ namespace OcclusionCulling
             float2 forwardXZ = math.normalizesafe(new float2(cameraForward.x, cameraForward.z), new float2(0f, 1f));
             float halfFovRad = math.radians(fovDegrees) * 0.5f;
             var sampleBounds = new Bounds3(default, default);
+            float camY = cameraPosition.y;
 
             for (int i = 0; i < map.sectorCount; i++)
             {
@@ -88,18 +95,20 @@ namespace OcclusionCulling
 
                 for (int j = 0; j < map.binCount; j++)
                 {
+                    int idx = i * map.binCount + j;
+                    if (j == 0)
+                    {
+                        //map.heights[idx] = float.MinValue;
+                        //continue;
+                    }
                     float r = map.distanceStep * j;
                     float2 sampleXZ = new float2(cameraPosition.x, cameraPosition.z) + dir2 * r;
                     sampleBounds.min = new float3(sampleXZ.x - 0.1f, -10000f, sampleXZ.y - 0.1f);
                     sampleBounds.max = new float3(sampleXZ.x + 0.1f, 10000f, sampleXZ.y + 0.1f);
 
-                    // sample terrain height
                     var heightRange = TerrainUtils.GetHeightRange(ref terrainHeight, sampleBounds);
-                    float terrainY = heightRange.max;
-
-                    int idx = i * map.binCount + j;
-                    // fold terrain into running horizon
-                    float maxHeight = j == 0 ? terrainY : math.max(map.heights[idx - 1], terrainY);
+                    float terrainAngle = math.atan2(heightRange.max - camY, r);
+                    float maxAngle = math.max(map.heights[idx - 1], terrainAngle);
                     // fold in object occluders within threshold
                     if (r <= occluderMaxDistance)
                     {
@@ -110,13 +119,14 @@ namespace OcclusionCulling
                         for (int k = 0; k < occluders.Length; k++)
                         {
                             var occ = occluders[k];
-                            maxHeight = math.max(maxHeight, occ.bounds.m_Bounds.max.y);
+                            float occAngle = math.atan2(occ.bounds.m_Bounds.max.y - camY, r);
+                            maxAngle = math.max(maxAngle, occAngle);
                         }
                     }
-                    map.heights[idx] = maxHeight;
+                    map.heights[idx] = maxAngle;
+                    map.points.Add(new float3(dir2.x, maxAngle, dir2.y));
                 }
             }
-
             occluders.Dispose();
             return map;
         }
@@ -131,6 +141,7 @@ namespace OcclusionCulling
             float3 cameraPosition,
             float3 cameraForward,
             out int nextIndex,
+            out NativeHashSet<float3> points,
             Allocator allocator = Allocator.Temp,
             float fovDegrees = 90f,
             int sectorCount = 128,
@@ -150,11 +161,12 @@ namespace OcclusionCulling
             // Build horizon map
             var map = BuildRadialHeightMap(quadTree, entityManager, terrainHeight, cameraPosition, cameraForward, fovDegrees, sectorCount, binCount, maxDistance, clearanceMeters, allocator, occluderMaxDistance, maxOccluders);
             Mod.log.Info($"SectorCulling: completed radial map, sample: {map.heights[0]}, sampleLast: {map.heights[map.heights.Length - 1]}");
+
             // Gather candidates using existing collector
             var collector = new OcclusionUtilities.CandidateCollector(cameraPosition, cameraForward, maxDistance);
             quadTree.Iterate(ref collector, 0);
 
-            var result = new NativeList<CullingCandidate>(allocator);
+            var result = new NativeList<CullingCandidate>(collector.candidates.Length, allocator);
             // Schedule and execute the burst-backed culling job
             var handle = ScheduleCullBySectorJob(
                 collector.candidates,
@@ -172,10 +184,11 @@ namespace OcclusionCulling
             map.Dispose();
             collector.Dispose();
             nextIndex = 0;
+            points = map.points;
             return result;
         }
 
-        //[StructLayout(LayoutKind.Sequential)]
+        [StructLayout(LayoutKind.Sequential)]
         public struct CullingCandidate
         {
             public Entity entity;
@@ -184,7 +197,7 @@ namespace OcclusionCulling
         
         // Burst job for parallel sector culling
         //[BurstCompile]
-        public struct CullBySectorJob : IJobParallelFor
+        public struct CullBySectorJob : IJobFor
         {
             [ReadOnly] public NativeArray<CullingCandidate> candidates;
             [ReadOnly] public NativeArray<float> heights;
@@ -194,6 +207,7 @@ namespace OcclusionCulling
             [ReadOnly] public float distanceStep;
             [ReadOnly] public float2 camXZ;
             [ReadOnly] public float2 forwardXZ;
+            [ReadOnly] public float camY;
             [ReadOnly] public float clearance;
             public NativeList<CullingCandidate>.ParallelWriter results;
 
@@ -218,9 +232,12 @@ namespace OcclusionCulling
                 if (math.abs(angle) > halfFovRad) return;
                 int sector = math.clamp((int)((angle + halfFovRad) / (2 * halfFovRad) * sectorCount), 0, sectorCount - 1);
                 int bin = math.clamp((int)(dist / distanceStep), 0, binCount - 1);
-                float horizon = heights[sector * binCount + bin];
-                float objTopY = bounds.m_Bounds.max.y;
-                if (objTopY <= horizon - clearance)
+                //float horizon = heights[sector * binCount + bin];
+                //float objTopY = bounds.m_Bounds.max.y;
+                float horizonAngle = heights[sector * binCount + bin];
+                float objectHeightAdj = bounds.m_Bounds.max.y - clearance;
+                float elevationAngle = math.atan2(objectHeightAdj - camY, dist);
+                if (elevationAngle <= horizonAngle)
                 {
                     results.AddNoResize(item);
                 }
@@ -228,7 +245,7 @@ namespace OcclusionCulling
         }
 
         /// <summary>
-        /// Schedule the sector-culling job as an IJobParallelFor.
+        /// Schedule the sector-culling job as an IJobFor.
         /// </summary>
         public static JobHandle ScheduleCullBySectorJob(
             NativeList<CullingCandidate> candidateList,
@@ -260,10 +277,11 @@ namespace OcclusionCulling
                 distanceStep = map.distanceStep,
                 camXZ = camXZ,
                 forwardXZ = forwardXZ,
+                camY = cameraPosition.y,
                 clearance = map.clearance,
                 results = writer
             };
-            return job.Schedule(candidates.Length, batchSize, dependency);
+            return IJobForExtensions.ScheduleParallelByRef(ref job, candidates.Length, batchSize, dependency);
         }
         
     }

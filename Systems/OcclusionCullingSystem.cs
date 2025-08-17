@@ -10,6 +10,7 @@ using Colossal.Logging;
 using Game.Simulation;
 using System;
 using Colossal.Entities;
+using Colossal.Mathematics;
 
 namespace OcclusionCulling
 {
@@ -22,6 +23,7 @@ namespace OcclusionCulling
         private Game.Rendering.PreCullingSystem m_PreCullingSystem;
         private Game.Objects.SearchSystem m_SearchSystem;
         private Game.Simulation.TerrainSystem m_TerrainSystem;
+        private OverlayRenderSystem m_OverlayRenderSystem;
         private NativeHashMap<Entity, QuadTreeBoundsXZ> m_cachedCulls;
         private NativeHashSet<Entity> m_dirtiedEntities;
 
@@ -39,6 +41,7 @@ namespace OcclusionCulling
             m_PreCullingSystem = World.GetExistingSystemManaged<Game.Rendering.PreCullingSystem>();
             m_SearchSystem = World.GetExistingSystemManaged<Game.Objects.SearchSystem>();
             m_TerrainSystem = World.GetExistingSystemManaged<Game.Simulation.TerrainSystem>();
+            m_OverlayRenderSystem = World.GetExistingSystemManaged<OverlayRenderSystem>();
             m_cachedCulls = new NativeHashMap<Entity, QuadTreeBoundsXZ>(1024, Allocator.Persistent);
             m_dirtiedEntities = new NativeHashSet<Entity>(1024, Allocator.Persistent);
         }
@@ -127,8 +130,27 @@ namespace OcclusionCulling
                 terrainData,
                 camPos,
                 camDir,
-                out var nextIndex
+                out var nextIndex,
+                out var points
             );
+
+            var buffer = m_OverlayRenderSystem.GetBuffer(out var dep);
+            s_log.Info($"Points count: {points.Count}");
+            //dep.Complete();
+
+            //int lineCount = 0;
+            //for (int i = 0; i < points.Length; i++)
+            //{
+            //    if (lineCount > 1)
+            //    {
+            //        continue;
+            //    }
+            //    var point = points[i];
+            //    lineCount++;
+            //    s_log.Info($"Point: {point}");
+            //    //Line3.Segment line = new Line3.Segment(camPos, point);
+            //    //buffer.DrawLine(UnityEngine.Color.red, line, 1f);
+            //}
 
             s_log.Info($"Found {occluded.Length} objects to occlude");
 
