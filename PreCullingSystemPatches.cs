@@ -21,6 +21,7 @@ namespace OcclusionCulling
         }
     }
 
+    // TODO: patch minLod distance-based culling calculation but keeping mesh choice logic intact
     //[HarmonyPatch(typeof(PreCullingSystem), "OnUpdate")]
     //static class PreCullingLODScalePatch
     //{

@@ -1,16 +1,11 @@
-using Unity.Burst;
 using Unity.Collections;
 using Unity.Entities;
 using Unity.Mathematics;
 using Game.Rendering;
 using Unity.Jobs;
-using Colossal.Collections;
 using Game.Common;
 using Colossal.Logging;
-using Game.Simulation;
 using System;
-using Colossal.Entities;
-using Colossal.Mathematics;
 
 namespace OcclusionCulling
 {
@@ -26,13 +21,14 @@ namespace OcclusionCulling
         private OverlayRenderSystem m_OverlayRenderSystem;
         private NativeHashMap<Entity, QuadTreeBoundsXZ> m_cachedCulls;
         private NativeHashSet<Entity> m_dirtiedEntities;
+        private NativeHashSet<float3> m_DebugLines;
 
         static int occlusionResumeIndex = 0;
         static readonly float kMoveThreshold = 3f;
         static readonly int kMaxObjectsPerFrame = 256; //low value for testing
 
         private float3 m_LastCameraPos = float3.zero;
-        private bool resetCache = true;
+        private float3 m_LastCameraDir = float3.zero;
 
         protected override void OnCreate()
         {
@@ -44,6 +40,7 @@ namespace OcclusionCulling
             m_OverlayRenderSystem = World.GetExistingSystemManaged<OverlayRenderSystem>();
             m_cachedCulls = new NativeHashMap<Entity, QuadTreeBoundsXZ>(1024, Allocator.Persistent);
             m_dirtiedEntities = new NativeHashSet<Entity>(1024, Allocator.Persistent);
+            m_DebugLines = new NativeHashSet<float3>(1024, Allocator.Persistent);
         }
 
         protected override void OnStartRunning()
@@ -51,6 +48,7 @@ namespace OcclusionCulling
             s_log.Info(nameof(OnStartRunning));
             if (m_cachedCulls.Count > 0) m_cachedCulls.Clear();
             if (m_dirtiedEntities.Count > 0) m_dirtiedEntities.Clear();
+            if (m_DebugLines.Count > 0) m_DebugLines.Clear();
             base.OnStartRunning();
         }
 
@@ -71,21 +69,38 @@ namespace OcclusionCulling
             m_dirtiedEntities.Add(e);
         }
 
+        // Todo occassionally null reference here (probably from temp, static entities being created in one frame and deleted in a later one)
         protected void removeDirty(Entity e)
         {
-            EntityManager.SetComponentEnabled<OcclusionDirtyTag>(e, false);
+            if (!m_dirtiedEntities.Contains(e)) return;
+            if (!EntityManager.HasComponent<OcclusionDirtyTag>(e))
+                EntityManager.SetComponentEnabled<OcclusionDirtyTag>(e, false);
             m_dirtiedEntities.Remove(e);
         }
         protected override void OnUpdate()
         {
             // Bail if the camera system isn't ready
-            if (!m_CameraSystem.TryGetLODParameters(out var lodParams))
+            if (m_CameraSystem == null ||  !m_CameraSystem.TryGetLODParameters(out var lodParams))
             {
                 return;
             }
 
-            float3 camPos = lodParams.cameraPosition;
-            float3 camDir = m_CameraSystem.activeViewer.forward;
+            float3 camPos = m_LastCameraPos;
+            float3 camDir = m_LastCameraDir;
+            camPos = lodParams.cameraPosition;
+            camDir = m_CameraSystem.activeViewer.forward;
+            
+            var buffer = m_OverlayRenderSystem.GetBuffer(out var dep);
+            //int lc = 0;
+            //foreach (float3 point in m_DebugLines)
+            //{
+            //    lc++;
+            //    if (lc % 5 != 0) { continue; }
+            //    //var lPad = math.normalize(camDir) * 2f;
+            //    //Line3.Segment segment = new Line3.Segment(camPos + lPad, camPos + point);
+            //    //buffer.DrawLine(UnityEngine.Color.red, segment, 1f);
+            //    buffer.DrawCircle(UnityEngine.Color.red, camPos + point, 1f);
+            //}
 
             // Bail out if looking straight down, or if camera hasn't moved and there are no pending hide/unhide operations
             bool lookingDown = camDir.y < -0.9f;
@@ -116,14 +131,6 @@ namespace OcclusionCulling
             Dependency = JobHandle.CombineDependencies(Dependency, readDeps);
             var terrainData = m_TerrainSystem.GetHeightData();
 
-            //var occluded = OcclusionUtilities.FindTerrainOccludedEntities(
-            //    staticTreeRO,
-            //    terrainData,
-            //    camPos,
-            //    camDir,
-            //    this.EntityManager,
-            //    out var nextIndex
-            //);
             var occluded = SectorOcclusionCulling.CullByRadialMap(
                 staticTreeRO,
                 this.EntityManager,
@@ -134,22 +141,10 @@ namespace OcclusionCulling
                 out var points
             );
 
-            var buffer = m_OverlayRenderSystem.GetBuffer(out var dep);
-            s_log.Info($"Points count: {points.Count}");
-            //dep.Complete();
-
-            //int lineCount = 0;
-            //for (int i = 0; i < points.Length; i++)
+            //m_DebugLines.Clear();
+            //foreach (var p in points)
             //{
-            //    if (lineCount > 1)
-            //    {
-            //        continue;
-            //    }
-            //    var point = points[i];
-            //    lineCount++;
-            //    s_log.Info($"Point: {point}");
-            //    //Line3.Segment line = new Line3.Segment(camPos, point);
-            //    //buffer.DrawLine(UnityEngine.Color.red, line, 1f);
+            //    m_DebugLines.Add(p);
             //}
 
             s_log.Info($"Found {occluded.Length} objects to occlude");
@@ -256,6 +251,7 @@ namespace OcclusionCulling
 
             occlusionResumeIndex = nextIndex;
             m_LastCameraPos = camPos;
+            m_LastCameraDir = camDir;
             return;
         }
 

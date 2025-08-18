@@ -39,7 +39,7 @@ namespace OcclusionCulling
             public void Dispose()
             {
                 if (heights.IsCreated) heights.Dispose();
-                if (points.IsCreated) points.Dispose();
+                //if (points.IsCreated) points.Dispose();
             }
         }
 
@@ -58,8 +58,8 @@ namespace OcclusionCulling
             float maxDistance,
             float clearanceMeters,
             Allocator allocator,
-            float occluderMaxDistance = 200f,
-            int maxOccluders = 2)
+            float occluderMaxDistance = 400f,
+            int maxOccluders = 4)
         {
             // ensure true-geometry queries use the correct EntityManager
             OcclusionUtilities.entityManager = entityManager;
@@ -98,8 +98,8 @@ namespace OcclusionCulling
                     int idx = i * map.binCount + j;
                     if (j == 0)
                     {
-                        //map.heights[idx] = float.MinValue;
-                        //continue;
+                        map.heights[idx] = float.MinValue;
+                        continue;
                     }
                     float r = map.distanceStep * j;
                     float2 sampleXZ = new float2(cameraPosition.x, cameraPosition.z) + dir2 * r;
@@ -107,7 +107,7 @@ namespace OcclusionCulling
                     sampleBounds.max = new float3(sampleXZ.x + 0.1f, 10000f, sampleXZ.y + 0.1f);
 
                     var heightRange = TerrainUtils.GetHeightRange(ref terrainHeight, sampleBounds);
-                    float terrainAngle = math.atan2(heightRange.max - camY, r);
+                    float terrainAngle = math.atan2(heightRange.max - camY - clearanceMeters, r);
                     float maxAngle = math.max(map.heights[idx - 1], terrainAngle);
                     // fold in object occluders within threshold
                     if (r <= occluderMaxDistance)
@@ -118,13 +118,14 @@ namespace OcclusionCulling
                         quadTree.Iterate(ref rq, 0);
                         for (int k = 0; k < occluders.Length; k++)
                         {
+                            
                             var occ = occluders[k];
-                            float occAngle = math.atan2(occ.bounds.m_Bounds.max.y - camY, r);
+                            float occAngle = math.atan2(occ.bounds.m_Bounds.max.y - camY - clearanceMeters, r);
                             maxAngle = math.max(maxAngle, occAngle);
                         }
                     }
                     map.heights[idx] = maxAngle;
-                    map.points.Add(new float3(dir2.x, maxAngle, dir2.y));
+                    map.points.Add(new float3(dir2.x * r, math.tan(maxAngle) * r, dir2.y * r));
                 }
             }
             occluders.Dispose();
@@ -143,31 +144,27 @@ namespace OcclusionCulling
             out int nextIndex,
             out NativeHashSet<float3> points,
             Allocator allocator = Allocator.Temp,
-            float fovDegrees = 90f,
-            int sectorCount = 128,
-            int binCount = 128,
-            float maxDistance = 1000f,
+            float fovDegrees = 90f, // TODO: use actual FOV
+            int sectorCount = 96,
+            int binCount = 152,
+            float maxDistance = 1500f,
             float clearanceMeters = 0.5f,
-            float occluderMaxDistance = 200f,
-            int maxOccluders = 2,
+            float occluderMaxDistance = 400f,
+            int maxOccluders = 3,
             int startIndex = 0,
             int maxResults = int.MaxValue)
         {
             Mod.log.Info($"SectorCulling: starting cullbyradialmap");
-            // initialize and route EntityManager for queries
             OcclusionUtilities.entityManager = entityManager;
-            // pagination start
             nextIndex = startIndex;
-            // Build horizon map
+
             var map = BuildRadialHeightMap(quadTree, entityManager, terrainHeight, cameraPosition, cameraForward, fovDegrees, sectorCount, binCount, maxDistance, clearanceMeters, allocator, occluderMaxDistance, maxOccluders);
             Mod.log.Info($"SectorCulling: completed radial map, sample: {map.heights[0]}, sampleLast: {map.heights[map.heights.Length - 1]}");
 
-            // Gather candidates using existing collector
             var collector = new OcclusionUtilities.CandidateCollector(cameraPosition, cameraForward, maxDistance);
             quadTree.Iterate(ref collector, 0);
 
             var result = new NativeList<CullingCandidate>(collector.candidates.Length, allocator);
-            // Schedule and execute the burst-backed culling job
             var handle = ScheduleCullBySectorJob(
                 collector.candidates,
                 map,
@@ -180,11 +177,11 @@ namespace OcclusionCulling
 
             Mod.log.Info($"SectorCulling: Job completed, {result.Length} results found");
             handle.Complete();
-            // Cleanup
-            map.Dispose();
+
             collector.Dispose();
-            nextIndex = 0;
+            nextIndex = 0; // TODO implement batching with new burst job system
             points = map.points;
+            map.Dispose();
             return result;
         }
 
@@ -196,7 +193,7 @@ namespace OcclusionCulling
         }
         
         // Burst job for parallel sector culling
-        //[BurstCompile]
+        [BurstCompile]
         public struct CullBySectorJob : IJobFor
         {
             [ReadOnly] public NativeArray<CullingCandidate> candidates;
@@ -208,6 +205,7 @@ namespace OcclusionCulling
             [ReadOnly] public float2 camXZ;
             [ReadOnly] public float2 forwardXZ;
             [ReadOnly] public float camY;
+            [ReadOnly] public float camYaw;
             [ReadOnly] public float clearance;
             public NativeList<CullingCandidate>.ParallelWriter results;
 
@@ -220,26 +218,38 @@ namespace OcclusionCulling
                 float2 objXZ = new float2(center.x, center.z);
                 float2 toObj = objXZ - camXZ;
                 float dist = math.length(toObj);
+                
                 if (dist <= 0f) return;
-                float angle = math.atan2(toObj.y, toObj.x) - math.atan2(forwardXZ.y, forwardXZ.x);
-                // normalize to [-π,π]
+
+                float angle = math.atan2(toObj.y, toObj.x) - camYaw;
+
                 if (angle < -math.PI) angle += math.PI * 2;
                 else if (angle > math.PI) angle -= math.PI * 2;
-                if (index == 1)
-                {
-                    Mod.log.Info($"SectorCulling: sampledCandidateLoop. entity({entity.Index}), center({center}), objXZ({objXZ}), dist({dist}), angle({angle}), halfFovRad({halfFovRad})");
-                }
                 if (math.abs(angle) > halfFovRad) return;
+
                 int sector = math.clamp((int)((angle + halfFovRad) / (2 * halfFovRad) * sectorCount), 0, sectorCount - 1);
                 int bin = math.clamp((int)(dist / distanceStep), 0, binCount - 1);
-                //float horizon = heights[sector * binCount + bin];
-                //float objTopY = bounds.m_Bounds.max.y;
-                float horizonAngle = heights[sector * binCount + bin];
+                
+                float horizonCenter = heights[sector * binCount + bin];
                 float objectHeightAdj = bounds.m_Bounds.max.y - clearance;
                 float elevationAngle = math.atan2(objectHeightAdj - camY, dist);
-                if (elevationAngle <= horizonAngle)
+                if (elevationAngle < horizonCenter)
                 {
-                    results.AddNoResize(item);
+                    // Additional checks to prevent self-culling and to ensure edges of object aren't still visible
+                    float halfWidth = (bounds.m_Bounds.max.x - bounds.m_Bounds.min.x) * 0.5f;
+                    float halfDepth = (bounds.m_Bounds.max.z - bounds.m_Bounds.min.z) * 0.5f;
+                    float objectRadius = math.length(new float2(halfWidth, halfDepth));
+                    float angRadius = math.atan2(objectRadius, dist);
+
+                    int leftSector = math.clamp((int)((angle - angRadius + halfFovRad) / (2 * halfFovRad) * sectorCount), 0, sectorCount - 1);
+                    int rightSector = math.clamp((int)((angle + angRadius + halfFovRad) / (2 * halfFovRad) * sectorCount), 0, sectorCount - 1);
+                    float horizonLeft = heights[leftSector * binCount + bin];
+                    float horizonRight = heights[rightSector * binCount + bin];
+
+                    if (elevationAngle < horizonLeft && elevationAngle < horizonRight)
+                    {
+                        results.AddNoResize(item);
+                    }
                 }
             }
         }
@@ -278,6 +288,7 @@ namespace OcclusionCulling
                 camXZ = camXZ,
                 forwardXZ = forwardXZ,
                 camY = cameraPosition.y,
+                camYaw = math.atan2(forwardXZ.y, forwardXZ.x),
                 clearance = map.clearance,
                 results = writer
             };
