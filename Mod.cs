@@ -46,7 +46,6 @@ namespace OcclusionCulling
                 m_Setting.UnregisterInOptionsUI();
                 m_Setting = null;
             }
-            
             OcclusionSystem = null;
         }
 
