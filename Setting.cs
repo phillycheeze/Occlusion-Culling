@@ -9,19 +9,35 @@ using System.Collections.Generic;
 namespace OcclusionCulling
 {
     [FileLocation("OcclusionCullingMod")]
-    [SettingsUIGroupOrder(kMainGroup, kAdvGroup)]
-    [SettingsUIShowGroupName(kMainGroup, kAdvGroup)]
+    [SettingsUIGroupOrder(kMainGroup, kKeybindingGroup, kAdvGroup)]
+    [SettingsUIShowGroupName(kMainGroup)]
     public class Setting : ModSetting
     {
         public const string kSection = "Main";
-        public const string kAdvSection = "Advanced";
+        //public const string kAdvSection = "Advanced";
 
         public const string kMainGroup = "Main";
         public const string kAdvGroup = "Advanced";
 
+        public const string kKeybindingGroup = "KeyBinding";
+
         public Setting(IMod mod) : base(mod)
         {
 
+        }
+
+        [SettingsUIKeyboardBinding(BindingKeyboard.M, Mod.kButtonActionName, ctrl: true)]
+        [SettingsUISection(kSection, kKeybindingGroup)]
+        public ProxyBinding KeyboardBinding { get; set; }
+
+        [SettingsUISection(kSection, kKeybindingGroup)]
+        public bool ResetBindings
+        {
+            set
+            {
+                Mod.log.Info("Reset key bindings");
+                ResetKeyBindings();
+            }
         }
 
         [SettingsUISlider(min = 200, max = 3000, step = 10, scalarMultiplier = 1, unit = Unit.kInteger)]
@@ -29,19 +45,19 @@ namespace OcclusionCulling
         public int MaxDistanceSlider { get; set; }
 
         [SettingsUISlider(min = 24, max = 196, step = 2, scalarMultiplier = 1, unit = Unit.kInteger)]
-        [SettingsUISection(kAdvSection, kAdvGroup)]
+        [SettingsUISection(kSection, kAdvGroup)]
         public int SectorsSlider { get; set; }
 
         [SettingsUISlider(min = 24, max = 256, step = 2, scalarMultiplier = 1, unit = Unit.kInteger)]
-        [SettingsUISection(kAdvSection, kAdvGroup)]
+        [SettingsUISection(kSection, kAdvGroup)]
         public int BinsSlider { get; set; }
 
         [SettingsUISlider(min = 100, max = 2500, step = 10, scalarMultiplier = 1, unit = Unit.kInteger)]
-        [SettingsUISection(kAdvSection, kAdvGroup)]
+        [SettingsUISection(kSection, kAdvGroup)]
         public int ObjectOcclusionDistanceSlider { get; set; }
 
         [SettingsUISlider(min = 50, max = 2500, step = 10, scalarMultiplier = 1, unit = Unit.kInteger)]
-        [SettingsUISection(kAdvSection, kAdvGroup)]
+        [SettingsUISection(kSection, kAdvGroup)]
         public int BatchSizeSlider { get; set; }
 
 
@@ -70,7 +86,15 @@ namespace OcclusionCulling
                 { m_Setting.GetSettingsLocaleID(), "Better Culling (Alpha)" },
 
                 { m_Setting.GetOptionTabLocaleID(Setting.kSection), "Main" },
-                { m_Setting.GetOptionTabLocaleID(Setting.kAdvSection), "Advanced" },
+                { m_Setting.GetOptionGroupLocaleID(Setting.kKeybindingGroup), "Key bindings" },
+                { m_Setting.GetOptionLabelLocaleID(nameof(Setting.KeyboardBinding)), "Enable/Disable system" },
+                { m_Setting.GetOptionDescLocaleID(nameof(Setting.KeyboardBinding)), $"Keyboard binding of Button input action" },
+
+                { m_Setting.GetOptionLabelLocaleID(nameof(Setting.ResetBindings)), "Reset key bindings" },
+                { m_Setting.GetOptionDescLocaleID(nameof(Setting.ResetBindings)), $"Reset all key bindings of the mod" },
+
+                { m_Setting.GetBindingKeyLocaleID(Mod.kButtonActionName), "Button key" },
+                //{ m_Setting.GetOptionTabLocaleID(Setting.kAdvSection), "Advanced" },
 
                 //{ m_Setting.GetBindingMapLocaleID(), "Mod settings sample" },
             };

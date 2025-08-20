@@ -8,12 +8,8 @@ using Unity.Burst;
 using Unity.Jobs;
 using Game.Common;
 using System.Runtime.InteropServices;
-using Colossal.Logging;
-using Game.Buildings;
-using System.Collections.Generic;
-using UnityEngine.Rendering;
-using Colossal.Internal.Gizmos;
-using Game.Rendering;
+using Game.Prefabs;
+using Game.Objects;
 
 namespace OcclusionCulling
 {
@@ -48,7 +44,10 @@ namespace OcclusionCulling
         /// </summary>
         public static RadialHeightMap BuildRadialHeightMap(
             NativeQuadTree<Entity, QuadTreeBoundsXZ> quadTree,
-            EntityManager entityManager,
+            ComponentLookup<PrefabRef> prefabLookup,
+            ComponentLookup<MeshData> meshDataLookup,
+            ComponentLookup<Transform> transformLookup,
+            BufferLookup<SubMesh> subMeshLookup,
             TerrainHeightData terrainHeight,
             float3 cameraPosition,
             float3 cameraForward,
@@ -59,10 +58,8 @@ namespace OcclusionCulling
             float clearanceMeters,
             Allocator allocator,
             float occluderMaxDistance = 400f,
-            int maxOccluders = 4)
+            int maxOccluders = 1)
         {
-            // ensure true-geometry queries use the correct EntityManager
-            OcclusionUtilities.entityManager = entityManager;
             var map = new RadialHeightMap
             {
                 heights = new NativeArray<float>(sectorCount * binCount, allocator, NativeArrayOptions.ClearMemory),
@@ -74,6 +71,7 @@ namespace OcclusionCulling
                 sectorAngleStep = math.radians(fovDegrees) / sectorCount,
                 distanceStep = maxDistance / (binCount - 1)
             };
+
 
             // prepare a reusable list for object occluders
             var occluders = new NativeList<CullingCandidate>(maxOccluders, Allocator.Temp);
@@ -113,8 +111,17 @@ namespace OcclusionCulling
                     if (r <= occluderMaxDistance)
                     {
                         occluders.Clear();
-                        var region = new QuadTreeBoundsXZ(sampleBounds, BoundsMask.AllLayers, 0);
-                        var rq = new OcclusionUtilities.RegionQueryCollector { searchRegion = region, results = occluders, maxCount = maxOccluders };
+                        var region = new QuadTreeBoundsXZ(sampleBounds, BoundsMask.NormalLayers, 0);
+                        var rq = new OcclusionUtilities.RegionQueryCollector
+                        {
+                            searchRegion = region,
+                            results = occluders,
+                            maxCount = maxOccluders,
+                            PrefabRefLookup = prefabLookup,
+                            MeshDataLookup = meshDataLookup,
+                            TransformLookup = transformLookup,
+                            SubMeshLookup = subMeshLookup
+                        };
                         quadTree.Iterate(ref rq, 0);
                         for (int k = 0; k < occluders.Length; k++)
                         {
@@ -137,29 +144,29 @@ namespace OcclusionCulling
         /// </summary>
         public static NativeList<CullingCandidate> CullByRadialMap(
             NativeQuadTree<Entity, QuadTreeBoundsXZ> quadTree,
-            EntityManager entityManager,
+            ComponentLookup<PrefabRef> prefabLookup,
+            ComponentLookup<MeshData> meshDataLookup,
+            ComponentLookup<Transform> transformLookup,
+            BufferLookup<SubMesh> subMeshLookup,
             TerrainHeightData terrainHeight,
             float3 cameraPosition,
             float3 cameraForward,
             out int nextIndex,
             out NativeHashSet<float3> points,
-            Allocator allocator = Allocator.Temp,
+            Allocator allocator = Allocator.TempJob,
             float fovDegrees = 90f, // TODO: use actual FOV
             int sectorCount = 96,
             int binCount = 152,
             float maxDistance = 1500f,
             float clearanceMeters = 0.5f,
             float occluderMaxDistance = 400f,
-            int maxOccluders = 3,
+            int maxOccluders = 1,
             int startIndex = 0,
             int maxResults = int.MaxValue)
         {
-            Mod.log.Info($"SectorCulling: starting cullbyradialmap");
-            OcclusionUtilities.entityManager = entityManager;
             nextIndex = startIndex;
 
-            var map = BuildRadialHeightMap(quadTree, entityManager, terrainHeight, cameraPosition, cameraForward, fovDegrees, sectorCount, binCount, maxDistance, clearanceMeters, allocator, occluderMaxDistance, maxOccluders);
-            Mod.log.Info($"SectorCulling: completed radial map, sample: {map.heights[0]}, sampleLast: {map.heights[map.heights.Length - 1]}");
+            var map = BuildRadialHeightMap(quadTree, prefabLookup, meshDataLookup, transformLookup, subMeshLookup, terrainHeight, cameraPosition, cameraForward, fovDegrees, sectorCount, binCount, maxDistance, clearanceMeters, allocator, occluderMaxDistance, maxOccluders);
 
             var collector = new OcclusionUtilities.CandidateCollector(cameraPosition, cameraForward, maxDistance);
             quadTree.Iterate(ref collector, 0);
@@ -175,7 +182,6 @@ namespace OcclusionCulling
                 batchSize: 256,
                 dependency: default);
 
-            Mod.log.Info($"SectorCulling: Job completed, {result.Length} results found");
             handle.Complete();
 
             collector.Dispose();
@@ -270,7 +276,6 @@ namespace OcclusionCulling
             // prepare inputs and output writer
             int count = candidateList.Length;
             var candidates = candidateList.AsArray();
-            Mod.log.Info($"SectorCullingScheduler: {candidates.Length} vs {candidateList.Length}");
             resultList.Clear();
             var writer = resultList.AsParallelWriter();
             float2 camXZ = new float2(cameraPosition.x, cameraPosition.z);

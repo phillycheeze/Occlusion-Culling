@@ -15,18 +15,31 @@ namespace OcclusionCulling
     public static class OcclusionUtilities
     {
         private static ILog s_log = Mod.log;
-        public static EntityManager entityManager;
 
-        private static QuadTreeBoundsXZ GetTrueGeometryBounds(Entity e, QuadTreeBoundsXZ bounds)
+        // TODO: Either do
+        // A) Grab the SubMesh components from the Prefab and use those bounds (usually more accurate, but some things still don't fit well)
+        // B) Create and maintain a list of prefab overrides to either ignore them or tweak their bounds
+        // C) somehow figure out a better way to get the true mesh bounding box
+        // D) combo of A and B
+        private static QuadTreeBoundsXZ GetTrueGeometryBounds(
+            Entity e,
+            QuadTreeBoundsXZ bounds,
+            ComponentLookup<PrefabRef> prefabRefLookup,
+            ComponentLookup<MeshData> meshDataLookup,
+            ComponentLookup<Transform> transformLookup,
+            BufferLookup<SubMesh> subMeshLookup
+        )
         {
-            if(entityManager.HasComponent<PrefabRef>(e))
+            if(prefabRefLookup.HasComponent(e))
             {
-                PrefabRef pr = entityManager.GetComponentData<PrefabRef>(e);
-                if (entityManager.HasComponent<ObjectGeometryData>(e))
+                PrefabRef pr = prefabRefLookup[e];
+                if (subMeshLookup.TryGetBuffer(pr.m_Prefab, out var buffer))
                 {
-                    ObjectGeometryData geo = entityManager.GetComponentData<ObjectGeometryData>(e);
-                    Transform t = entityManager.GetComponentData<Transform>(e);
-                    var realBoundary = ObjectUtils.CalculateBounds(t.m_Position, t.m_Rotation, geo);
+                    SubMesh first = buffer[0];
+                    Entity subMesh = first.m_SubMesh;
+                    MeshData md = meshDataLookup[subMesh];
+                    Transform t = transformLookup[e];
+                    var realBoundary = ObjectUtils.CalculateBounds(t.m_Position, t.m_Rotation, md.m_Bounds);
                     return new QuadTreeBoundsXZ(realBoundary, BoundsMask.AllLayers, bounds.m_MinLod);
                 }
             }
@@ -54,7 +67,7 @@ namespace OcclusionCulling
                 float3 max = new float3(math.max(cameraPosition.x, forwardPoint.x), cameraPosition.y + maxDistance, math.max(cameraPosition.z, forwardPoint.z));
                 searchBounds = new QuadTreeBoundsXZ(
                     new Bounds3(min, max),
-                    BoundsMask.AllLayers,
+                    BoundsMask.NormalLayers,
                     0
                 );
             }
@@ -66,8 +79,6 @@ namespace OcclusionCulling
 
             public void Iterate(QuadTreeBoundsXZ bounds, Entity item)
             {
-                // Possible already culled items here, could check mask too
-                // if (bounds.m_MinLod >= byte.MaxValue) return;
                 var can = new SectorOcclusionCulling.CullingCandidate();
                 can.entity = item;
                 can.bounds = bounds;
@@ -82,6 +93,10 @@ namespace OcclusionCulling
 
         public struct RegionQueryCollector : INativeQuadTreeIterator<Entity, QuadTreeBoundsXZ>
         {
+            [ReadOnly] public ComponentLookup<PrefabRef> PrefabRefLookup;
+            [ReadOnly] public ComponentLookup<MeshData> MeshDataLookup;
+            [ReadOnly] public ComponentLookup<Transform> TransformLookup;
+            [ReadOnly] public BufferLookup<SubMesh> SubMeshLookup;
             public QuadTreeBoundsXZ searchRegion;
             public NativeList<SectorOcclusionCulling.CullingCandidate> results;
             public int maxCount;
@@ -97,27 +112,29 @@ namespace OcclusionCulling
             {
                 if (count >= maxCount) return;
                 
+                var objectSize = (largeBounds.m_Bounds.max - largeBounds.m_Bounds.min);
+                var minDimension = math.min(math.min(objectSize.x, objectSize.y), objectSize.z);
+                var maxDimension = math.max(math.max(objectSize.x, objectSize.y), objectSize.z);
+
+                if (minDimension < 8f || maxDimension < 14f)
+                {
+                    return;
+                }
+
                 // Use large, more efficient bounds in the Intersection above, 
                 // now narrow down to true occluder geometry size
-                var bounds = GetTrueGeometryBounds(item, largeBounds);
+                var bounds = GetTrueGeometryBounds(item, largeBounds, PrefabRefLookup, MeshDataLookup, TransformLookup, SubMeshLookup);
                 bool passedTight = bounds.Intersect(searchRegion);
                 if (!passedTight)
                 {
                     // Didn't succeed in tighter filtering checking of true geometry
                     return;
                 }
-                var objectSize = (bounds.m_Bounds.max - bounds.m_Bounds.min);
-                var minDimension = math.min(math.min(objectSize.x, objectSize.y), objectSize.z);
-                var maxDimension = math.max(math.max(objectSize.x, objectSize.y), objectSize.z);
-
-                if (minDimension > 8f && maxDimension > 15f)
-                {
-                    var can = new SectorOcclusionCulling.CullingCandidate();
-                    can.entity = item;
-                    can.bounds = bounds;
-                    results.Add(can);
-                    count++;
-                }
+                var can = new SectorOcclusionCulling.CullingCandidate();
+                can.entity = item;
+                can.bounds = bounds;
+                results.Add(can);
+                count++;
             }
 
             public void Dispose()

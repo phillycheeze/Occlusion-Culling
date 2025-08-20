@@ -1,9 +1,13 @@
 ﻿using Colossal.IO.AssetDatabase;
 using Colossal.Logging;
 using Game;
+using Game.Input;
 using Game.Modding;
 using Game.SceneFlow;
 using HarmonyLib;
+using UnityEngine.InputSystem;
+using Unity.Mathematics;
+using UnityEngine;
 
 namespace OcclusionCulling
 {
@@ -12,6 +16,9 @@ namespace OcclusionCulling
         public static ILog log = LogManager.GetLogger($"{nameof(OcclusionCulling)}.{nameof(Mod)}").SetShowsErrorsInUI(false);
         private Setting m_Setting;
         private Harmony m_Harmony;
+
+        public static ProxyAction m_ButtonAction;
+        public const string kButtonActionName = "ButtonBinding";
 
         public static OcclusionCullingSystem OcclusionSystem { get; private set; }
         public void OnLoad(UpdateSystem updateSystem)
@@ -24,6 +31,16 @@ namespace OcclusionCulling
             m_Setting = new Setting(this);
             m_Setting.RegisterInOptionsUI();
             GameManager.instance.localizationManager.AddSource("en-US", new LocaleEN(m_Setting));
+            m_Setting.RegisterKeyBindings();
+
+            m_ButtonAction = m_Setting.GetAction(kButtonActionName);
+            m_ButtonAction.shouldBeEnabled = true;
+            m_ButtonAction.onInteraction += (_, phase) =>
+            {
+                if(phase == InputActionPhase.Performed && UnityEngine.Mathf.Approximately( m_ButtonAction.ReadValue<float>(), 1.0f))
+                    OcclusionSystem.Enabled = !OcclusionSystem.Enabled;
+                log.Info($"[{m_ButtonAction.name}] On{phase} {m_ButtonAction.ReadValue<float>()}");
+            };
             AssetDatabase.global.LoadSettings(nameof(OcclusionCulling), m_Setting, new Setting(this));
 
             m_Harmony = new Harmony($"{nameof(OcclusionCulling)}.{nameof(Mod)}");
@@ -32,6 +49,7 @@ namespace OcclusionCulling
             // Register occlusion culling
             updateSystem.UpdateAt<OcclusionCullingSystem>(SystemUpdatePhase.PreCulling);
             OcclusionSystem = updateSystem.World.GetOrCreateSystemManaged<OcclusionCullingSystem>();
+
         }
 
         public void OnDispose()
