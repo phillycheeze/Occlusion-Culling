@@ -1,3 +1,10 @@
+# 0.9.0 
+* Refactor RadialHeightMap calculations into three burst jobs, parallelized
+* Perform candidate collection before heightmap, then re-use much smaller candidates for Iterate()
+* Fix system order phase for same-frame culling
+* Refactor temp memory allocations when changing component data
+* Refactor interestion utility return types for better performance
+
 # 0.8.0
 * Use NormalLayers boundmasks filter to reduce number of intersect() tests against the search tree (small performance increase)
 * Fix testing true geometry bounds against each occluder before first checking the occluder's size (large performance increase)

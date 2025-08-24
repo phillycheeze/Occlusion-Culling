@@ -8,6 +8,8 @@ using HarmonyLib;
 using UnityEngine.InputSystem;
 using Unity.Mathematics;
 using UnityEngine;
+using Unity.Entities;
+using Game.Prefabs;
 
 namespace OcclusionCulling
 {
@@ -21,6 +23,7 @@ namespace OcclusionCulling
         public const string kButtonActionName = "ButtonBinding";
 
         public static OcclusionCullingSystem OcclusionSystem { get; private set; }
+        public static OcclusionStartupSystem StartupSystem { get; private set; }
         public void OnLoad(UpdateSystem updateSystem)
         {
             log.Info(nameof(OnLoad));
@@ -47,8 +50,12 @@ namespace OcclusionCulling
             m_Harmony.PatchAll();
 
             // Register occlusion culling
-            updateSystem.UpdateAt<OcclusionCullingSystem>(SystemUpdatePhase.PreCulling);
+            updateSystem.UpdateBefore<OcclusionCullingSystem>(SystemUpdatePhase.PreCulling);
             OcclusionSystem = updateSystem.World.GetOrCreateSystemManaged<OcclusionCullingSystem>();
+
+            // TODO: Determine if this is needed
+            //updateSystem.UpdateAfter<OcclusionStartupSystem>(SystemUpdatePhase.Rendering);
+            //StartupSystem = updateSystem.World.GetOrCreateSystemManaged<OcclusionStartupSystem>();
 
         }
 
@@ -65,6 +72,7 @@ namespace OcclusionCulling
                 m_Setting = null;
             }
             OcclusionSystem = null;
+            StartupSystem = null;
         }
 
 

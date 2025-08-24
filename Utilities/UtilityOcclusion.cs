@@ -4,18 +4,24 @@ using Colossal.Collections;
 using Unity.Mathematics;
 using Game.Common;
 using Colossal.Mathematics;
-using Game.Rendering;
 using Colossal.Logging;
-using Game.Simulation;
 using Game.Objects;
 using Game.Prefabs;
+using OcclusionCulling.Utilities;
+using System.Collections.Generic;
+using HarmonyLib;
+using Unity.Burst;
 
 namespace OcclusionCulling
 {
     public static class OcclusionUtilities
     {
-        private static ILog s_log = Mod.log;
+        private static readonly ILog s_log = Mod.log;
+        private static readonly LRUCache<int, QuadTreeBoundsXZ> cache = new(4096);
 
+        private static readonly float boundingScaleCorrection = 0.60f;
+
+        // For now, applying fixed scaleCorrection percentage
         // TODO: Either do
         // A) Grab the SubMesh components from the Prefab and use those bounds (usually more accurate, but some things still don't fit well)
         // B) Create and maintain a list of prefab overrides to either ignore them or tweak their bounds
@@ -33,44 +39,71 @@ namespace OcclusionCulling
             if(prefabRefLookup.HasComponent(e))
             {
                 PrefabRef pr = prefabRefLookup[e];
-                if (subMeshLookup.TryGetBuffer(pr.m_Prefab, out var buffer))
-                {
-                    SubMesh first = buffer[0];
-                    Entity subMesh = first.m_SubMesh;
-                    MeshData md = meshDataLookup[subMesh];
-                    Transform t = transformLookup[e];
-                    var realBoundary = ObjectUtils.CalculateBounds(t.m_Position, t.m_Rotation, md.m_Bounds);
-                    return new QuadTreeBoundsXZ(realBoundary, BoundsMask.AllLayers, bounds.m_MinLod);
+
+                // TODO: Can't use managed LRUCache class with burst compiler
+                //QuadTreeBoundsXZ cacheHit = cache.Get(pr.m_Prefab.Index);
+
+                // byte.MinValue is checking if returned a default() object
+                //if (cacheHit.m_MinLod == byte.MinValue)
+                //{
+                    if (subMeshLookup.TryGetBuffer(pr.m_Prefab, out var buffer))
+                    {
+                        if (buffer.IsEmpty)
+                        {
+                            //cache.Add(pr.m_Prefab.Index, bounds);
+                            return bounds;
+                        }
+                        
+                        // Todo, how to handle objects with multiple submeshes (not many)
+                        SubMesh first = buffer[0];
+                        Entity subMesh = first.m_SubMesh;
+
+                        if (
+                            !meshDataLookup.TryGetComponent(subMesh, out MeshData md) ||
+                            !transformLookup.TryGetComponent(e, out Transform t)
+                        )
+                        {
+                            //cache.Add(pr.m_Prefab.Index, bounds);
+                            return bounds;
+                        }
+
+                        md.m_Bounds.min.x *= boundingScaleCorrection;
+                        md.m_Bounds.min.z *= boundingScaleCorrection;
+                        md.m_Bounds.max.x *= boundingScaleCorrection;
+                        md.m_Bounds.max.z *= boundingScaleCorrection;
+                        Bounds3 realBoundary = ObjectUtils.CalculateBounds(t.m_Position, t.m_Rotation, md.m_Bounds);
+                        QuadTreeBoundsXZ result = new(realBoundary, bounds.m_Mask, bounds.m_MinLod);
+                        //cache.Add(pr.m_Prefab.Index, result);
+                        return result;
+                    }
+                    else
+                    {
+                        //cache.Add(pr.m_Prefab.Index, bounds);
+                        return bounds;
+                    }
                 }
-            }
+
+                //return cacheHit;
+            //}
             return bounds;
+        }
+
+
+        [BurstCompile]
+        public struct TreeFlattenCollector : INativeQuadTreeIterator<Entity, QuadTreeBoundsXZ>
+        {
+            public NativeList<KeyValuePair<Entity, QuadTreeBoundsXZ>> results;
+            public bool Intersect(QuadTreeBoundsXZ bounds) { return true; }
+            public void Iterate(QuadTreeBoundsXZ bounds, Entity item) {
+                results.Add(new KeyValuePair<Entity, QuadTreeBoundsXZ>(item, bounds));
+            }
         }
 
         public struct CandidateCollector : INativeQuadTreeIterator<Entity, QuadTreeBoundsXZ>
         {
-            public float3 cameraPosition;
-            public float3 cameraDirectionXZ;
-            public float maxDistance;
-
-            public NativeList<SectorOcclusionCulling.CullingCandidate> candidates;
-            private QuadTreeBoundsXZ searchBounds;
-
-            public CandidateCollector(float3 cameraPos, float3 cameraDir, float searchRadius)
-            {
-                cameraPosition = cameraPos;
-                cameraDirectionXZ = math.normalizesafe(new float3(cameraDir.x, 0f, cameraDir.z), new float3(0f, 0f, 1f));
-                maxDistance = searchRadius;
-                candidates = new NativeList<SectorOcclusionCulling.CullingCandidate>(2000, Allocator.Temp);
-
-                float3 forwardPoint = cameraPosition + (cameraDirectionXZ * maxDistance);
-                float3 min = new float3(math.min(cameraPosition.x, forwardPoint.x), cameraPosition.y - maxDistance, math.min(cameraPosition.z, forwardPoint.z));
-                float3 max = new float3(math.max(cameraPosition.x, forwardPoint.x), cameraPosition.y + maxDistance, math.max(cameraPosition.z, forwardPoint.z));
-                searchBounds = new QuadTreeBoundsXZ(
-                    new Bounds3(min, max),
-                    BoundsMask.NormalLayers,
-                    0
-                );
-            }
+            public NativeQuadTree<Entity, QuadTreeBoundsXZ> candidates;
+            public QuadTreeBoundsXZ searchBounds;
+            public int candidateCount;
 
             public bool Intersect(QuadTreeBoundsXZ bounds)
             {
@@ -79,15 +112,16 @@ namespace OcclusionCulling
 
             public void Iterate(QuadTreeBoundsXZ bounds, Entity item)
             {
-                var can = new SectorOcclusionCulling.CullingCandidate();
-                can.entity = item;
-                can.bounds = bounds;
-                candidates.Add(can);
+                if(candidates.TryAdd(item, bounds))
+                {
+                    candidateCount++;
+                }
             }
 
             public void Dispose()
             {
                 if (candidates.IsCreated) candidates.Dispose();
+                candidateCount = 0;
             }
         }
 
@@ -98,7 +132,7 @@ namespace OcclusionCulling
             [ReadOnly] public ComponentLookup<Transform> TransformLookup;
             [ReadOnly] public BufferLookup<SubMesh> SubMeshLookup;
             public QuadTreeBoundsXZ searchRegion;
-            public NativeList<SectorOcclusionCulling.CullingCandidate> results;
+            public NativeList<KeyValuePair<Entity, QuadTreeBoundsXZ>> results;
             public int maxCount;
 
             private int count;
@@ -113,15 +147,16 @@ namespace OcclusionCulling
                 if (count >= maxCount) return;
                 
                 var objectSize = (largeBounds.m_Bounds.max - largeBounds.m_Bounds.min);
-                var minDimension = math.min(math.min(objectSize.x, objectSize.y), objectSize.z);
-                var maxDimension = math.max(math.max(objectSize.x, objectSize.y), objectSize.z);
+                var minDimension = math.min(objectSize.x, objectSize.z);
+                var maxDimension = math.max(objectSize.x, objectSize.z);
 
-                if (minDimension < 8f || maxDimension < 14f)
+                // Completely skip thin/flat height objects
+                if (objectSize.y < 15f || minDimension < 9f || maxDimension < 15f)
                 {
                     return;
                 }
 
-                // Use large, more efficient bounds in the Intersection above, 
+                //Use large, more efficient bounds in the Intersection above, 
                 // now narrow down to true occluder geometry size
                 var bounds = GetTrueGeometryBounds(item, largeBounds, PrefabRefLookup, MeshDataLookup, TransformLookup, SubMeshLookup);
                 bool passedTight = bounds.Intersect(searchRegion);
@@ -130,10 +165,7 @@ namespace OcclusionCulling
                     // Didn't succeed in tighter filtering checking of true geometry
                     return;
                 }
-                var can = new SectorOcclusionCulling.CullingCandidate();
-                can.entity = item;
-                can.bounds = bounds;
-                results.Add(can);
+                results.Add(new KeyValuePair<Entity, QuadTreeBoundsXZ>(item, largeBounds));
                 count++;
             }
 

@@ -1,20 +1,30 @@
+using Colossal.Collections;
+using Colossal.Entities;
+using Colossal.Logging;
+using Colossal.Mathematics;
+using Game.Citizens;
+using Game.Common;
+using Game.Modding.Toolchain.Dependencies;
+using Game.Objects;
+using Game.Prefabs;
+using Game.Rendering;
+using Game.Simulation;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using Unity.Burst;
 using Unity.Collections;
 using Unity.Entities;
-using Unity.Mathematics;
-using Game.Rendering;
-using Game.Objects;
 using Unity.Jobs;
-using Game.Common;
-using Colossal.Logging;
-using System;
+using Unity.Mathematics;
 using static OcclusionCulling.SectorOcclusionCulling;
-using Unity.Burst;
-using Game.Prefabs;
 
 namespace OcclusionCulling
 {
-    [UpdateAfter(typeof(Game.Objects.SearchSystem))]
-    [UpdateBefore(typeof(Game.Rendering.PreCullingSystem))]
+    //[UpdateAfter(typeof(Game.Objects.SearchSystem))]
+    [UpdateBefore(typeof(PreCullingSystem))]
+    //[UpdateBefore(typeof(BatchInstanceSystem))]
     public partial class OcclusionCullingSystem : SystemBase
     {
         private static ILog s_log = Mod.log;
@@ -22,17 +32,18 @@ namespace OcclusionCulling
         private Game.Rendering.PreCullingSystem m_PreCullingSystem;
         private Game.Objects.SearchSystem m_SearchSystem;
         private Game.Simulation.TerrainSystem m_TerrainSystem;
-        private OverlayRenderSystem m_OverlayRenderSystem;
+        private EntityCommandBuffer m_ECB;
+        private ComponentLookup<OcclusionDirtyTag> m_DirtyComponentLookup;
+        private ComponentLookup<CullingInfo> m_CullingInfoLookup;
         private NativeHashMap<Entity, QuadTreeBoundsXZ> m_cachedCulls;
         private NativeHashSet<Entity> m_dirtiedEntities;
 
-        static int occlusionResumeIndex = 0; // Not implemented yet
+        NativeQueue<KeyValuePair<Entity, QuadTreeBoundsXZ>> m_Queue;
+
         static readonly float kMoveThreshold = 3f;
-        static readonly int kMaxObjectsPerFrame = 256; //low value for testing
 
         private float3 m_LastCameraPos = float3.zero;
         private float3 m_LastCameraDir = float3.zero;
-        private bool shouldUpdateThisFrame = false;
 
         protected override void OnCreate()
         {
@@ -41,9 +52,12 @@ namespace OcclusionCulling
             m_PreCullingSystem = World.GetExistingSystemManaged<Game.Rendering.PreCullingSystem>();
             m_SearchSystem = World.GetExistingSystemManaged<Game.Objects.SearchSystem>();
             m_TerrainSystem = World.GetExistingSystemManaged<Game.Simulation.TerrainSystem>();
-            m_OverlayRenderSystem = World.GetExistingSystemManaged<OverlayRenderSystem>();
-            m_cachedCulls = new NativeHashMap<Entity, QuadTreeBoundsXZ>(2048, Allocator.Persistent);
+            m_DirtyComponentLookup = GetComponentLookup<OcclusionDirtyTag>(true);
+            m_CullingInfoLookup = GetComponentLookup<CullingInfo>(false);
+            m_cachedCulls = new NativeHashMap<Entity, QuadTreeBoundsXZ>(10000, Allocator.Persistent);
             m_dirtiedEntities = new NativeHashSet<Entity>(2048, Allocator.Persistent);
+
+            m_Queue = new(Allocator.Persistent);
         }
 
         protected override void OnStartRunning()
@@ -51,7 +65,7 @@ namespace OcclusionCulling
             s_log.Info(nameof(OnStartRunning));
             if (m_cachedCulls.Count > 0) m_cachedCulls.Clear();
             if (m_dirtiedEntities.Count > 0) m_dirtiedEntities.Clear();
-            base.OnStartRunning();
+            if (m_Queue.Count > 0) m_Queue.Clear();
         }
 
         protected override void OnDestroy()
@@ -59,23 +73,22 @@ namespace OcclusionCulling
             s_log.Info(nameof(OnDestroy));
             if (m_cachedCulls.IsCreated) m_cachedCulls.Dispose();
             if (m_dirtiedEntities.IsCreated) m_dirtiedEntities.Dispose();
+            if (m_ECB.IsCreated) m_ECB.Dispose();
             base.OnDestroy();
         }
 
         protected void markDirty(Entity e)
         {
             if (m_dirtiedEntities.Contains(e)) return;
-            if (!EntityManager.HasComponent<OcclusionDirtyTag>(e))
-                EntityManager.AddComponent<OcclusionDirtyTag>(e);
-            EntityManager.SetComponentEnabled<OcclusionDirtyTag>(e, true);
+            m_ECB.AddComponent<OcclusionDirtyTag>(e); // Doesn't assert even if component already exists
+            m_ECB.SetComponentEnabled<OcclusionDirtyTag>(e, true);
             m_dirtiedEntities.Add(e);
         }
 
-        // Todo occassionally null reference here (probably from temp, static entities being created in one frame and deleted in a later one)
         protected void removeDirty(Entity e)
         {
-            if (!EntityManager.HasComponent<OcclusionDirtyTag>(e))
-                EntityManager.SetComponentEnabled<OcclusionDirtyTag>(e, false);
+            if (m_DirtyComponentLookup.HasComponent(e) && m_DirtyComponentLookup.HasEnabledComponent(e))
+                m_ECB.SetComponentEnabled<OcclusionDirtyTag>(e, false);
         }
         protected override void OnUpdate()
         {
@@ -84,201 +97,139 @@ namespace OcclusionCulling
             {
                 return;
             }
-
-            // Maybe skip every other frame if the camera is only currently moving?
-            if (!shouldUpdateThisFrame)
-            {
-                shouldUpdateThisFrame = !shouldUpdateThisFrame;
-                return;
-            }
+            var stopwatch = new Stopwatch();
+            stopwatch.Start();
 
             float3 camPos = m_LastCameraPos;
             float3 camDir = m_LastCameraDir;
             camPos = lodParams.cameraPosition;
             camDir = m_CameraSystem.activeViewer.forward;
             
-            var buffer = m_OverlayRenderSystem.GetBuffer(out var dep);
-
-            // Bail out if looking straight down, or if camera hasn't moved and there are no pending hide/unhide operations
             bool lookingDown = camDir.y < -0.9f;
             float2 deltaXZ = new float2(camPos.x - m_LastCameraPos.x, camPos.z - m_LastCameraPos.z);
             bool moved = math.lengthsq(deltaXZ) > (kMoveThreshold * kMoveThreshold);
 
-            // If we aren't in the middle of a batch
-            if (occlusionResumeIndex == 0)
+            //Bail if camera hasn't moved or looking downward, but keep culling unless looking down
+            if (lookingDown || !moved)
             {
-                //Bail if camera hasn't moved or looking downward
-                if(lookingDown || !moved)
-                {
-                    return;
-                }
-            }
-            else
-            {
-                // We are in the middle of a batch, but reset batch if we moved
-                if (moved)
-                {
-                    occlusionResumeIndex = 0;
-                }
+                return;
             }
 
-            long timer = DateTimeOffset.Now.ToUnixTimeMilliseconds();
-
-            var staticTreeRO = m_SearchSystem.GetStaticSearchTree(readOnly: true, out var readDeps);
-            Dependency = JobHandle.CombineDependencies(Dependency, readDeps);
+            m_ECB = new EntityCommandBuffer(Allocator.Temp);
+            var staticTreeRO = m_SearchSystem.GetStaticSearchTree(readOnly: false, out var readDeps);
             var terrainData = m_TerrainSystem.GetHeightData();
+            NativeQuadTree<Entity, QuadTreeBoundsXZ> candidates = new(20000, Allocator.TempJob); // Must put here because there is no Dispose(handle) function
+            m_Queue.Clear();
 
-            var occluded = SectorOcclusionCulling.CullByRadialMap(
+            // TODO:
+            // 1. Make radial map into burst job, fetch dependency
+            // 2. Fetch candidates
+            // 3. Call culling job, passing dependency from before (return this dependency instead of occluders)
+            // 4. Make culling/unculling below into job, using returned dependency
+            // 5. Swap out toUnCull.Add() and toTriggerCull.Add() into function calls to cleanup hashset setting, for loops, etc
+
+            // Maybe? Move dirty/undirty logic to be separate from occlusion logic (it keeps entities dirty even when camera isn't moving)
+            // .. lets just undirty them at the top of the OnUpdate (in a job), since marking dirty for an entity two frames in a row is rare
+            // .. We don't need to maintain cache anymore, just use EntityQuery to find any enabled and swap them back (complete dependency before step 5 job runs above)
+            var soc = new SectorOcclusionCulling(camPos, camDir);
+            soc.m_PrefabRefLookup = GetComponentLookup<PrefabRef>(true);
+            soc.m_MeshDataLookup = GetComponentLookup<MeshData>(true);
+            soc.m_TransformLookup = GetComponentLookup<Game.Objects.Transform>(true);
+            soc.m_SubMeshLookup = GetBufferLookup<SubMesh>(true);
+
+            readDeps.Complete();
+
+            var timerBeforeJob = stopwatch.ElapsedMilliseconds;
+            JobHandle queueHandle = soc.CullByRadialMap(
                 staticTreeRO,
-                GetComponentLookup<PrefabRef>(true),
-                GetComponentLookup<MeshData>(true),
-                GetComponentLookup<Transform>(true),
-                GetBufferLookup<SubMesh>(true),
+                candidates,
                 terrainData,
-                camPos,
-                camDir,
-                out var nextIndex,
-                out var points
+                m_Queue,
+                out int nextIndex
             );
 
-            // Todo: make the for loops consolidated and don't instantiate hashsets each frame
-            NativeHashSet<Entity> toUnCull = new NativeHashSet<Entity>(occluded.Length, Allocator.Temp);
-            NativeHashSet<Entity> toTriggerCull = new NativeHashSet<Entity>(occluded.Length, Allocator.Temp);
-            NativeHashSet<Entity> toUndirty = new NativeHashSet<Entity>(m_dirtiedEntities.Count, Allocator.Temp);
+            // TEMP FOR TESTING until bottom moved to job
+            queueHandle.Complete();
+            var timerForJob = stopwatch.ElapsedMilliseconds;
 
-            // Copy dirtyEntities to reset later
-            foreach(Entity e in m_dirtiedEntities)
+            // Build a map of this frame's cull candidates
+            var currentMap = new NativeHashMap<Entity, QuadTreeBoundsXZ>(m_Queue.Count, Allocator.Temp);
+            var reader = m_Queue.AsReadOnly().GetEnumerator();
+            while (reader.MoveNext())
             {
-                toUndirty.Add(e);
-            }
-            m_dirtiedEntities.Clear();
-
-            // Un-cull anything that isn't present this frame but was last frame
-            foreach (var item in m_cachedCulls)
-            {
-                Entity e = item.Key;
-                bool culledAgain = false;
-                for (int j = 0; j < occluded.Length; j++)
-                {
-                    if (occluded[j].entity.Equals(e))
-                    {
-                        culledAgain = true;
-                        break;
-                    }
-                }
-
-                if (!culledAgain)
-                {
-                    toUnCull.Add(e);
-                }
+                var kvp = reader.Current;
+                currentMap.Add(kvp.Key, kvp.Value);
             }
 
-            // Trigger new cull unless was culled in previous actionable frame
-            foreach (var item in occluded)
-            {
-                Entity e = item.entity;
-                QuadTreeBoundsXZ b = item.bounds;
-                if (m_cachedCulls.ContainsKey(e))
-                {
-                    continue;
-                }
-                toTriggerCull.Add(e);
-                m_cachedCulls.TryAdd(e, b);
-            }
+            // Extract keys for set operations
+            var currentKeys = currentMap.GetKeyArray(Allocator.Temp);
+            var previousKeys = m_cachedCulls.GetKeyArray(Allocator.Temp);
+            int size = math.max(currentKeys.Length, previousKeys.Length);
 
-            // Perform culling
-            int enforcedCount = 0;
-            foreach (var e in toTriggerCull) 
-            {
-                if (!EntityManager.Exists(e))
-                {
-                    continue;
-                }
-                markDirty(e);
-                var ci = EntityManager.GetComponentData<CullingInfo>(e);
-                ci.m_Mask = 0;
-                EntityManager.SetComponentData(e, ci);
-                enforcedCount++;
-            }
+            // Entities to newly cull (in current but not in cache)
+            var cullTemp = new NativeHashSet<Entity>(size, Allocator.Temp);
+            cullTemp.UnionWith(currentKeys);
+            cullTemp.ExceptWith(previousKeys);                
 
-            // Perform unculling
-            int revertedCount = 0;
-            foreach (Entity e in toUnCull)
+            // Apply culling changes
+            foreach (var e in cullTemp)
             {
-                if (m_cachedCulls.TryGetValue(e, out var bounds))
+                if (EntityManager.Exists(e))
                 {
-                    if(!EntityManager.Exists(e))
-                    {
-                        continue;
-                    }
                     markDirty(e);
-                    var ci = EntityManager.GetComponentData<CullingInfo>(e);
-                    ci.m_Mask = bounds.m_Mask;
+                    ref var ci = ref m_CullingInfoLookup.GetRefRW(e).ValueRW;
+                    ci.m_Mask = 0;
+                    m_cachedCulls.Add(e, currentMap[e]);
+                }
+            }
 
-                    EntityManager.SetComponentData(e, ci);
-                    revertedCount++;
+            cullTemp.Clear();
+            cullTemp.UnionWith(previousKeys);
+            cullTemp.ExceptWith(currentKeys);
+            foreach (var e in cullTemp)
+            {
+                if (EntityManager.Exists(e) && m_cachedCulls.TryGetValue(e, out var bounds))
+                {
+                    markDirty(e);
+                    ref var ci = ref m_CullingInfoLookup.GetRefRW(e).ValueRW;
+                    ci.m_Mask = bounds.m_Mask;
                     m_cachedCulls.Remove(e);
                 }
             }
 
-            // Resync dirtiedEntities from last actionable frame
-            foreach (Entity e in toUndirty)
+            // Reset any dirty tags for entities no longer changing
+            foreach (var e in m_dirtiedEntities)
             {
-                
-                if(m_dirtiedEntities.Contains(e))
+                if (!currentMap.ContainsKey(e) && !cullTemp.Contains(e))
                 {
-                    continue;
+                    removeDirty(e);
                 }
-                // Previous dirtied is no longer dirty, so let's remove it
-                removeDirty(e);
             }
 
+            if (m_ECB.ShouldPlayback)
+                m_ECB.Playback(EntityManager);
 
-            if (enforcedCount > 0 || revertedCount > 0)
+            stopwatch.Stop();
+            // Sample logs
+            if ((m_dirtiedEntities.Count > 0 || m_cachedCulls.Count > 0))
             {
-                s_log.Info($"OnUpdate: enforcedCulls:{enforcedCount}, revertedCulls:{revertedCount}, totalFound:{occluded.Length}, previousBatchIndex:{occlusionResumeIndex}, timeInMs:{DateTimeOffset.Now.ToUnixTimeMilliseconds() - timer}");
+                s_log.Info($"OnUpdate: dirtied: {m_dirtiedEntities.Count}, cached: {m_cachedCulls.Count}, timeInMs:{stopwatch.ElapsedMilliseconds}, timeJobOnly:{timerForJob}, timeBeforeJob:{timerBeforeJob}");
             }
 
-            occluded.Dispose();         
-
-            occlusionResumeIndex = nextIndex;
             m_LastCameraPos = camPos;
             m_LastCameraDir = camDir;
+
+            // Clean up temporaries
+            m_dirtiedEntities.Clear();
+            m_ECB.Dispose();
+            currentKeys.Dispose();
+            previousKeys.Dispose();
+            cullTemp.Dispose();
+            currentMap.Dispose();
+            candidates.Dispose();
             return;
+            
         }
-
-        ////[BurstCompile]
-        //public struct PerformOcclusionCulling : IJobFor
-        //{
-        //    [ReadOnly] public EntityTypeHandle m_EntityType;
-        //    public ComponentLookup<CullingInfo> m_CullingInfoLookup;
-        //    [ReadOnly] public ComponentTypeHandle<CullingInfo> m_CullingInfoComponent;
-        //    [ReadOnly] public ComponentTypeHandle<OcclusionDirtyTag> m_DirtyTag;
-        //    [ReadOnly] public NativeArray<Entity> toTriggerCull;
-
-        //    public EntityCommandBuffer.ParallelWriter buffer;
-
-        //    public void Execute(int index)
-        //    {
-        //        Entity e = toTriggerCull[index];
-        //    }
-        //}
-
-        ////[BurstCompile]
-        //public struct RevertOcclusionCulling : IJobFor
-        //{
-        //    [ReadOnly] public EntityTypeHandle m_EntityType;
-        //    [ReadOnly] public ComponentTypeHandle<CullingInfo> m_CullingInfoComponent;
-        //    [ReadOnly] public ComponentTypeHandle<OcclusionDirtyTag> m_DirtyTag;
-        //    [ReadOnly] public NativeHashSet<Entity> toUnCull;
-
-        //    public EntityCommandBuffer.ParallelWriter buffer;
-
-        //    public void Execute(int index)
-        //    {
-        //        //removeDirty(e);
-        //    }
-        //}
     }
 }
 
