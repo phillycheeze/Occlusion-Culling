@@ -1,3 +1,4 @@
+using Colossal;
 using Colossal.Collections;
 using Colossal.Entities;
 using Colossal.Logging;
@@ -16,14 +17,16 @@ using System.Linq;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Entities;
+using Unity.Entities.UniversalDelegates;
 using Unity.Jobs;
 using Unity.Mathematics;
+using UnityEngine;
 using static OcclusionCulling.SectorOcclusionCulling;
 
 namespace OcclusionCulling
 {
     //[UpdateAfter(typeof(Game.Objects.SearchSystem))]
-    [UpdateBefore(typeof(PreCullingSystem))]
+    [UpdateAfter(typeof(PreCullingSystem))]
     //[UpdateBefore(typeof(BatchInstanceSystem))]
     public partial class OcclusionCullingSystem : SystemBase
     {
@@ -37,6 +40,8 @@ namespace OcclusionCulling
         private ComponentLookup<CullingInfo> m_CullingInfoLookup;
         private NativeHashMap<Entity, QuadTreeBoundsXZ> m_cachedCulls;
         private NativeHashSet<Entity> m_dirtiedEntities;
+        private NativeParallelHashMap<Entity, OcclusionCullingStruct> m_visibleCandidates;
+        private TerrainHeightData m_terrainHeightData;
 
         NativeQueue<KeyValuePair<Entity, QuadTreeBoundsXZ>> m_Queue;
 
@@ -44,6 +49,9 @@ namespace OcclusionCulling
 
         private float3 m_LastCameraPos = float3.zero;
         private float3 m_LastCameraDir = float3.zero;
+        private bool m_dirtiedTerrain = true;
+
+        public bool shouldRenderLines = false;
 
         protected override void OnCreate()
         {
@@ -54,6 +62,7 @@ namespace OcclusionCulling
             m_TerrainSystem = World.GetExistingSystemManaged<Game.Simulation.TerrainSystem>();
             m_DirtyComponentLookup = GetComponentLookup<OcclusionDirtyTag>(true);
             m_CullingInfoLookup = GetComponentLookup<CullingInfo>(false);
+            m_visibleCandidates = new NativeParallelHashMap<Entity, OcclusionCullingStruct>(50000, Allocator.Persistent);
             m_cachedCulls = new NativeHashMap<Entity, QuadTreeBoundsXZ>(10000, Allocator.Persistent);
             m_dirtiedEntities = new NativeHashSet<Entity>(2048, Allocator.Persistent);
 
@@ -90,6 +99,15 @@ namespace OcclusionCulling
             if (m_DirtyComponentLookup.HasComponent(e) && m_DirtyComponentLookup.HasEnabledComponent(e))
                 m_ECB.SetComponentEnabled<OcclusionDirtyTag>(e, false);
         }
+
+        protected bool AnyTerrainSliceUpdated()
+        {
+            if (m_dirtiedTerrain) return true; // Short circuit for first time
+            var slices = m_TerrainSystem.heightMapSliceUpdated; // bool[4]
+            for (int i = 0; i < slices.Length; i++)
+                if (slices[i]) return true;
+            return false;
+        }
         protected override void OnUpdate()
         {
             // Bail if the camera system isn't ready
@@ -97,36 +115,86 @@ namespace OcclusionCulling
             {
                 return;
             }
+
             var stopwatch = new Stopwatch();
             stopwatch.Start();
 
             float3 camPos = m_LastCameraPos;
             float3 camDir = m_LastCameraDir;
-            camPos = lodParams.cameraPosition;
-            camDir = m_CameraSystem.activeViewer.forward;
-            
+            if (shouldRenderLines)
+            {
+            }
+            else
+            {
+                camPos = lodParams.cameraPosition;
+                camDir = m_CameraSystem.activeViewer.forward;
+            }
+
             bool lookingDown = camDir.y < -0.9f;
             float2 deltaXZ = new float2(camPos.x - m_LastCameraPos.x, camPos.z - m_LastCameraPos.z);
             bool moved = math.lengthsq(deltaXZ) > (kMoveThreshold * kMoveThreshold);
 
             //Bail if camera hasn't moved or looking downward, but keep culling unless looking down
-            if (lookingDown || !moved)
+            if ((lookingDown || !moved) && !shouldRenderLines)
             {
                 return;
             }
 
             m_ECB = new EntityCommandBuffer(Allocator.Temp);
-            var staticTreeRO = m_SearchSystem.GetStaticSearchTree(readOnly: false, out var readDeps);
-            var terrainData = m_TerrainSystem.GetHeightData();
-            NativeQuadTree<Entity, QuadTreeBoundsXZ> candidates = new(20000, Allocator.TempJob); // Must put here because there is no Dispose(handle) function
+            var staticTreeRO = m_SearchSystem.GetStaticSearchTree(readOnly: true, out var readDeps);
+
+            // REFACTOR
+            if(m_visibleCandidates.Count() <= 0)
+            {
+                var preCullingData = m_PreCullingSystem.GetCullingData(true, out JobHandle preCullHandle);
+                preCullHandle.Complete();
+                readDeps.Complete();
+                foreach (var c in preCullingData)
+                {
+                    if(c.m_Flags.HasFlag(PreCullingFlags.PassedCulling))
+                    {
+                        if(staticTreeRO.TryGet(c.m_Entity, out QuadTreeBoundsXZ bounds))
+                            m_visibleCandidates.TryAdd(c.m_Entity, new OcclusionCullingStruct { m_Data = c, m_Bounds = bounds });
+                    }
+                }
+            }
+            else
+            {
+                var updatedCullingData = m_PreCullingSystem.GetUpdatedData(true, out JobHandle updatedCullHandle);
+                updatedCullHandle.Complete();
+                foreach(var c in updatedCullingData)
+                {
+                    if (m_visibleCandidates.TryGetValue(c.m_Entity, out OcclusionCullingStruct item))
+                    {
+                        if (!c.m_Flags.HasFlag(PreCullingFlags.PassedCulling))
+                        {
+                            m_visibleCandidates.Remove(c.m_Entity);
+                            //m_visibleCandidates.Add(c.m_Entity, item);
+                        }
+                    }
+                    else
+                    {
+                        if(c.m_Flags.HasFlag(PreCullingFlags.PassedCulling))
+                        {
+                            if (staticTreeRO.TryGet(c.m_Entity, out QuadTreeBoundsXZ bounds))
+                                m_visibleCandidates.TryAdd(c.m_Entity, new OcclusionCullingStruct { m_Data = c, m_Bounds = bounds });
+                        }
+                    }
+                }
+            }
+            
+            if(AnyTerrainSliceUpdated())
+            {
+                m_dirtiedTerrain = false;
+                m_terrainHeightData = m_TerrainSystem.GetHeightData();
+            }
+            
             m_Queue.Clear();
 
             // TODO:
-            // 1. Make radial map into burst job, fetch dependency
-            // 2. Fetch candidates
-            // 3. Call culling job, passing dependency from before (return this dependency instead of occluders)
-            // 4. Make culling/unculling below into job, using returned dependency
-            // 5. Swap out toUnCull.Add() and toTriggerCull.Add() into function calls to cleanup hashset setting, for loops, etc
+            // 1. Gather candidates from PreCullingSystem GetCullingData (filter via PassedCulling flag)
+            // 2. After first scan, update cached candidates via the GetUpdatedData only (smaller, post-filtered list when things enter/leave visibility)
+            // 3. Change ObjectOccluder job to just do a loop over candidates for size check and MathUtils.Intersect test against raycast line
 
             // Maybe? Move dirty/undirty logic to be separate from occlusion logic (it keeps entities dirty even when camera isn't moving)
             // .. lets just undirty them at the top of the OnUpdate (in a job), since marking dirty for an entity two frames in a row is rare
@@ -142,8 +210,8 @@ namespace OcclusionCulling
             var timerBeforeJob = stopwatch.ElapsedMilliseconds;
             JobHandle queueHandle = soc.CullByRadialMap(
                 staticTreeRO,
-                candidates,
-                terrainData,
+                m_visibleCandidates,
+                m_terrainHeightData,
                 m_Queue,
                 out int nextIndex
             );
@@ -216,6 +284,49 @@ namespace OcclusionCulling
                 s_log.Info($"OnUpdate: dirtied: {m_dirtiedEntities.Count}, cached: {m_cachedCulls.Count}, timeInMs:{stopwatch.ElapsedMilliseconds}, timeJobOnly:{timerForJob}, timeBeforeJob:{timerBeforeJob}");
             }
 
+            if (shouldRenderLines && false)
+            {
+                //var gs = World.GetOrCreateSystemManaged<GizmosSystem>();
+                //var batcher = gs.GetGizmosBatcher(out var gizmosBatcher);
+
+                var gs = World.GetOrCreateSystemManaged<OverlayRenderSystem>();
+                var batcher = gs.GetBuffer(out var gizmosBatcher);
+                float halfFovRad = math.radians(90f) * 0.5f;
+                float sectorAngleStep = math.radians(90f) / 128;
+                Bounds3 cb = new(
+                    new float3(camPos.x - 0.1f, -3000f, camPos.z - 0.1f),
+                    new float3(camPos.x + 0.1f, 3000f, camPos.z + 0.1f)
+                );
+                var heightRange = TerrainUtils.GetHeightRange(ref m_terrainHeightData,cb);
+                float heightMax = heightRange.max;
+                for (var i = 0; i < 128; i++)
+                {
+                    float angle = -halfFovRad + (i + 0.5f) * sectorAngleStep;
+                    float sinA = math.sin(angle);
+                    float cosA = math.cos(angle);
+                    float2 dir = new float2(
+                        camDir.x * cosA - camDir.z * sinA,
+                        camDir.x * sinA + camDir.z * cosA
+                    );
+
+                    float2 sampleXZ = new float2(camPos.x, camPos.z) + dir * 2000f;
+
+                    for (var j = 0; j < 50; j++)
+                    {
+                        var y = (j * 20) + heightMax;
+
+
+                        float3 point = new float3(sampleXZ.x, y, sampleXZ.y);
+                        float3 from = new float3(camPos.x, y, camPos.z);
+                        Line3.Segment seg = new Line3.Segment(from, point);
+
+                        batcher.DrawLine(UnityEngine.Color.blue, seg, 0.1f);
+                    }
+                    
+                }
+                gizmosBatcher.Complete();
+            }
+
             m_LastCameraPos = camPos;
             m_LastCameraDir = camDir;
 
@@ -226,7 +337,6 @@ namespace OcclusionCulling
             previousKeys.Dispose();
             cullTemp.Dispose();
             currentMap.Dispose();
-            candidates.Dispose();
             return;
             
         }

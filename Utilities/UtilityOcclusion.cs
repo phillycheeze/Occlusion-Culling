@@ -16,8 +16,8 @@ namespace OcclusionCulling
 {
     public static class OcclusionUtilities
     {
-        private static readonly ILog s_log = Mod.log;
-        private static readonly LRUCache<int, QuadTreeBoundsXZ> cache = new(4096);
+        //private static readonly ILog s_log = Mod.log;
+        //private static readonly LRUCache<int, QuadTreeBoundsXZ> cache = new(4096);
 
         private static readonly float boundingScaleCorrection = 0.60f;
 
@@ -99,6 +99,7 @@ namespace OcclusionCulling
             }
         }
 
+        [BurstCompile]
         public struct CandidateCollector : INativeQuadTreeIterator<Entity, QuadTreeBoundsXZ>
         {
             public NativeQuadTree<Entity, QuadTreeBoundsXZ> candidates;
@@ -131,7 +132,8 @@ namespace OcclusionCulling
             [ReadOnly] public ComponentLookup<MeshData> MeshDataLookup;
             [ReadOnly] public ComponentLookup<Transform> TransformLookup;
             [ReadOnly] public BufferLookup<SubMesh> SubMeshLookup;
-            public QuadTreeBoundsXZ searchRegion;
+            //public QuadTreeBoundsXZ searchRegion;
+            public Bounds3 searchRegion;
             public NativeList<KeyValuePair<Entity, QuadTreeBoundsXZ>> results;
             public int maxCount;
 
@@ -139,7 +141,8 @@ namespace OcclusionCulling
 
             public bool Intersect(QuadTreeBoundsXZ nodeBounds)
             {
-                return nodeBounds.Intersect(searchRegion);
+                return MathUtils.Intersect(searchRegion, nodeBounds.m_Bounds);
+                //return nodeBounds.Intersect(searchRegion);
             }
 
             public void Iterate(QuadTreeBoundsXZ largeBounds, Entity item)
@@ -159,7 +162,8 @@ namespace OcclusionCulling
                 //Use large, more efficient bounds in the Intersection above, 
                 // now narrow down to true occluder geometry size
                 var bounds = GetTrueGeometryBounds(item, largeBounds, PrefabRefLookup, MeshDataLookup, TransformLookup, SubMeshLookup);
-                bool passedTight = bounds.Intersect(searchRegion);
+                //bool passedTight = bounds.Intersect(searchRegion);
+                bool passedTight = MathUtils.Intersect(searchRegion, bounds.m_Bounds);
                 if (!passedTight)
                 {
                     // Didn't succeed in tighter filtering checking of true geometry

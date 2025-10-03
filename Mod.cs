@@ -41,7 +41,7 @@ namespace OcclusionCulling
             m_ButtonAction.onInteraction += (_, phase) =>
             {
                 if(phase == InputActionPhase.Performed && UnityEngine.Mathf.Approximately( m_ButtonAction.ReadValue<float>(), 1.0f))
-                    OcclusionSystem.Enabled = !OcclusionSystem.Enabled;
+                    OcclusionSystem.shouldRenderLines= !OcclusionSystem.shouldRenderLines;
                 log.Info($"[{m_ButtonAction.name}] On{phase} {m_ButtonAction.ReadValue<float>()}");
             };
             AssetDatabase.global.LoadSettings(nameof(OcclusionCulling), m_Setting, new Setting(this));
@@ -50,7 +50,7 @@ namespace OcclusionCulling
             m_Harmony.PatchAll();
 
             // Register occlusion culling
-            updateSystem.UpdateBefore<OcclusionCullingSystem>(SystemUpdatePhase.PreCulling);
+            updateSystem.UpdateAt<OcclusionCullingSystem>(SystemUpdatePhase.PreCulling);
             OcclusionSystem = updateSystem.World.GetOrCreateSystemManaged<OcclusionCullingSystem>();
 
             // TODO: Determine if this is needed
