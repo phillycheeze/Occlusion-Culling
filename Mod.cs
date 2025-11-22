@@ -10,6 +10,7 @@ using Unity.Mathematics;
 using UnityEngine;
 using Unity.Entities;
 using Game.Prefabs;
+using OcclusionCulling.Systems;
 
 namespace OcclusionCulling
 {
@@ -22,6 +23,7 @@ namespace OcclusionCulling
         public static ProxyAction m_ButtonAction;
         public const string kButtonActionName = "ButtonBinding";
 
+        public static LodAdjustmentSystem m_LodAdjustmentSystem {  get; private set; }
         public static OcclusionCullingSystem OcclusionSystem { get; private set; }
         public static OcclusionStartupSystem StartupSystem { get; private set; }
         public void OnLoad(UpdateSystem updateSystem)
@@ -51,7 +53,9 @@ namespace OcclusionCulling
 
             // Register occlusion culling
             updateSystem.UpdateAt<OcclusionCullingSystem>(SystemUpdatePhase.PreCulling);
+            updateSystem.UpdateAfter<LodAdjustmentSystem, ObjectInitializeSystem>(SystemUpdatePhase.PrefabUpdate);
             OcclusionSystem = updateSystem.World.GetOrCreateSystemManaged<OcclusionCullingSystem>();
+            m_LodAdjustmentSystem = updateSystem.World.GetOrCreateSystemManaged<LodAdjustmentSystem>();
 
             // TODO: Determine if this is needed
             //updateSystem.UpdateAfter<OcclusionStartupSystem>(SystemUpdatePhase.Rendering);
