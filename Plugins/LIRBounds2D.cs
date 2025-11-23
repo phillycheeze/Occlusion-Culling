@@ -5,7 +5,7 @@ using UnityEngine;
 // 2D bounds.
 // NOT XY axis aligned.
 
-namespace OcclusionCulling.Plugins
+namespace PerformanceTweaks.Plugins
 {
 
     public class Bound2D

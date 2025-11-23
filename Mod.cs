@@ -1,31 +1,24 @@
 ﻿using Colossal.IO.AssetDatabase;
 using Colossal.Logging;
 using Game;
-using Game.Input;
 using Game.Modding;
 using Game.SceneFlow;
 using HarmonyLib;
-using UnityEngine.InputSystem;
-using Unity.Mathematics;
-using UnityEngine;
-using Unity.Entities;
-using Game.Prefabs;
-using OcclusionCulling.Systems;
 
-namespace OcclusionCulling
+using Game.Prefabs;
+using PerformanceTweaks.Systems;
+
+namespace PerformanceTweaks
 {
     public class Mod : IMod
     {
-        public static ILog log = LogManager.GetLogger($"{nameof(OcclusionCulling)}.{nameof(Mod)}").SetShowsErrorsInUI(false);
+		public static ILog log = LogManager.GetLogger($"{nameof(PerformanceTweaks)}.{nameof(Mod)}").SetShowsErrorsInUI(false);
         private Setting m_Setting;
         private Harmony m_Harmony;
 
-        public static ProxyAction m_ButtonAction;
-        public const string kButtonActionName = "ButtonBinding";
-
         public static LodAdjustmentSystem m_LodAdjustmentSystem {  get; private set; }
-        public static OcclusionCullingSystem OcclusionSystem { get; private set; }
-        public static OcclusionStartupSystem StartupSystem { get; private set; }
+        public static OcclusionCullingSystem m_OcclusionSystem { get; private set; }
+        public static OcclusionStartupSystem m_StartupSystem { get; private set; }
         public void OnLoad(UpdateSystem updateSystem)
         {
             log.Info(nameof(OnLoad));
@@ -33,29 +26,29 @@ namespace OcclusionCulling
             if (GameManager.instance.modManager.TryGetExecutableAsset(this, out var asset))
                 log.Info($"Current mod asset at {asset.path}");
 
-            m_Setting = new Setting(this);
-            m_Setting.RegisterInOptionsUI();
-            GameManager.instance.localizationManager.AddSource("en-US", new LocaleEN(m_Setting));
-            m_Setting.RegisterKeyBindings();
+			m_Setting = new Setting(this);
+			// Ensure in-memory defaults are set for first run before any UI is created
+			m_Setting.SetDefaults();
+			// Load saved settings (overrides defaults if present) BEFORE registering UI
+			var defaults = new Setting(this);
+			defaults.SetDefaults();
+			AssetDatabase.global.LoadSettings(nameof(PerformanceTweaks), m_Setting, defaults);
+			// Now register UI and localization
+			m_Setting.RegisterInOptionsUI();
+			GameManager.instance.localizationManager.AddSource("en-US", new LocaleEN(m_Setting));
 
-            m_ButtonAction = m_Setting.GetAction(kButtonActionName);
-            m_ButtonAction.shouldBeEnabled = true;
-            m_ButtonAction.onInteraction += (_, phase) =>
-            {
-                if(phase == InputActionPhase.Performed && UnityEngine.Mathf.Approximately( m_ButtonAction.ReadValue<float>(), 1.0f))
-                    OcclusionSystem.shouldRenderLines= !OcclusionSystem.shouldRenderLines;
-                log.Info($"[{m_ButtonAction.name}] On{phase} {m_ButtonAction.ReadValue<float>()}");
-            };
-            AssetDatabase.global.LoadSettings(nameof(OcclusionCulling), m_Setting, new Setting(this));
-
-            m_Harmony = new Harmony($"{nameof(OcclusionCulling)}.{nameof(Mod)}");
+			m_Harmony = new Harmony($"{nameof(PerformanceTweaks)}.{nameof(Mod)}");
             m_Harmony.PatchAll();
 
             // Register occlusion culling
             updateSystem.UpdateAt<OcclusionCullingSystem>(SystemUpdatePhase.PreCulling);
-            updateSystem.UpdateAfter<LodAdjustmentSystem, ObjectInitializeSystem>(SystemUpdatePhase.PrefabUpdate);
-            OcclusionSystem = updateSystem.World.GetOrCreateSystemManaged<OcclusionCullingSystem>();
-            m_LodAdjustmentSystem = updateSystem.World.GetOrCreateSystemManaged<LodAdjustmentSystem>();
+            m_OcclusionSystem = updateSystem.World.GetOrCreateSystemManaged<OcclusionCullingSystem>();
+            m_OcclusionSystem.Enabled = m_Setting.EnableTerrainCulling;
+
+			// LOD adjustment system (always created; apply settings live)
+			updateSystem.UpdateAfter<LodAdjustmentSystem, BuildingInitializeSystem>(SystemUpdatePhase.PrefabUpdate);
+			m_LodAdjustmentSystem = updateSystem.World.GetOrCreateSystemManaged<LodAdjustmentSystem>();
+			m_LodAdjustmentSystem.ApplySettings(m_Setting.EnableLodAdjustmentSystem, m_Setting.AggressiveCulling);
 
             // TODO: Determine if this is needed
             //updateSystem.UpdateAfter<OcclusionStartupSystem>(SystemUpdatePhase.Rendering);
@@ -75,8 +68,8 @@ namespace OcclusionCulling
                 m_Setting.UnregisterInOptionsUI();
                 m_Setting = null;
             }
-            OcclusionSystem = null;
-            StartupSystem = null;
+            m_OcclusionSystem = null;
+            m_StartupSystem = null;
         }
 
 

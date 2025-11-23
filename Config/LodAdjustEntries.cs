@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace OcclusionCulling.Config
+namespace PerformanceTweaks.Config
 {
     [Serializable]
     public struct LodAdjustEntry
@@ -52,20 +52,28 @@ namespace OcclusionCulling.Config
 
             // Reason: no LOD meshes and high vertex count
             new LodAdjustEntry { type = "StaticObjectPrefab", name = "LightpoleIndustrial04", deltaMinLod = 3 },
-            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "SportParkStandSmallCorner01", deltaMinLod = 3 },
-            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "SportParkStandSmallCorner02", deltaMinLod = 4 },
-            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "SportParkStandSmall01", deltaMinLod = 4 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "SportParkStandSmallCorner01", deltaMinLod = 4 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "SportParkStandSmallCorner02", deltaMinLod = 5 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "SportParkStandSmall01", deltaMinLod = 5 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "SportParkStandSmall02", deltaMinLod = 6 },
             new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "SportParkStandSmall02", deltaMinLod = 5 },
-            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "SportParkStandLarge01", deltaMinLod = 3 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "SportParkStandLargeCorner01", deltaMinLod = 5 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "SportParkStandLargeCorner02", deltaMinLod = 6 },
             new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "SportParkStandLarge01", deltaMinLod = 4 },
-            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ContainerCrane01", deltaMinLod = 2 },
-            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ContainerCrane02", deltaMinLod = 2 },
-            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ShippingContainerPileSmallLow01", deltaMinLod = 4 },
-            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ShippingContainerPileSmallMedium01", deltaMinLod = 5 },
-            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ShippingContainerPileMediumLow01", deltaMinLod = 5 },
-            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ShippingContainerPileLargeLow01", deltaMinLod = 5 },
-            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ShippingContainerPileLargeMedium01", deltaMinLod = 6 },
-            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ShippingContainerPileLargeHigh01", deltaMinLod = 7 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "SportParkStandLarge02", deltaMinLod = 4 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "SportParkStandLarge03", deltaMinLod = 4 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "SportParkStandLarge04", deltaMinLod = 4 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ContainerCrane01", deltaMinLod = 3 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ContainerCrane02", deltaMinLod = 3 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ShippingContainerPileSmallLow01", deltaMinLod = 5 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ShippingContainerPileSmallMedium01", deltaMinLod = 6 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ShippingContainerPileSmallHigh01", deltaMinLod = 5 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ShippingContainerPileMediumLow01", deltaMinLod = 6 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ShippingContainerPileMediumMedium01", deltaMinLod = 7 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ShippingContainerPileMediumHigh01", deltaMinLod = 5 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ShippingContainerPileLargeLow01", deltaMinLod = 6 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ShippingContainerPileLargeMedium01", deltaMinLod = 7 },
+            new LodAdjustEntry { type = "BuildingExtensionPrefab", name = "ShippingContainerPileLargeHigh01", deltaMinLod = 3 },
 
             // Reason: minLod is set too low
             new LodAdjustEntry { type = "PathwayPrefab", name = "Covered Pedestrian Bridge", deltaMinLod = 5 },

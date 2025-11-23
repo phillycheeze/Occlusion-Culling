@@ -1,8 +1,6 @@
 ﻿using System.Collections.Generic;
-using UnityEngine;
 
-
-namespace OcclusionCulling.Utilities
+namespace PerformanceTweaks.Utilities
 {
     // Combo LinkedList and Dictionary cache for O(1) reads and O(1) writes
     // TODO: maybe use a non-locking data structure?

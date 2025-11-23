@@ -1,7 +1,7 @@
 ﻿using Game.Common;
 using Game.Rendering;
 
-namespace OcclusionCulling
+namespace PerformanceTweaks.Utilities
 {
     public struct OcclusionCullingStruct
     {

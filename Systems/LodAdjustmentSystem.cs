@@ -1,22 +1,25 @@
-﻿using Colossal.Json;
-using Colossal.Logging;
-using Colossal.PSI.Environment;
+﻿using Colossal.Logging;
 using Game;
 using Game.Common;
 using Game.Prefabs;
-using OcclusionCulling.Config;
-using System;
+using PerformanceTweaks.Config;
 using System.Collections.Generic;
-using System.IO;
+using Unity.Entities;
 
-namespace OcclusionCulling.Systems
+namespace PerformanceTweaks.Systems
 {
     public partial class LodAdjustmentSystem : GameSystemBase
     {
         private static ILog m_Log = Mod.log;
         private PrefabSystem m_PrefabSystem;
 
-        private bool m_Finished = false;
+        public bool m_AggressiveCulling = false;
+
+        private int m_AggressiveCullingDelta = 3;
+        private bool m_Enabled = true;
+        private bool m_PendingApply = false;
+        private readonly Dictionary<Entity, int> m_OriginalMinLod = new();
+        
 
         protected override void OnCreate()
         {
@@ -31,15 +34,13 @@ namespace OcclusionCulling.Systems
 
         protected override void OnUpdate()
         {
-            if (m_Finished) return;
+            if (!m_PendingApply) return;
 
-            m_Log.Info($"Starting up LodAdjustmentSystem");
+            m_Log.Info($"Applying LOD tweaks (enabled={m_Enabled}, aggressive={m_AggressiveCulling})");
 
             foreach (LodAdjustEntry entry in LodAdjustConfig.Entries)
             {
                 var id = new PrefabID(entry.type, entry.name);
-
-                m_Log.Info($"Entry: {id.GetName()}");
 
                 if (!m_PrefabSystem.TryGetPrefab(id, out PrefabBase prefab))
                     continue;
@@ -47,20 +48,42 @@ namespace OcclusionCulling.Systems
                 if (!m_PrefabSystem.TryGetComponentData<ObjectGeometryData>(prefab, out var geom))
                     continue;
 
-                geom.m_MinLod += entry.deltaMinLod;
+                
                 var prefabEntity = m_PrefabSystem.GetEntity(prefab);
-                EntityManager.SetComponentData(prefabEntity, geom);
-                m_Log.Info($"...set to minLod of {geom.m_MinLod}");
 
+                if (!m_OriginalMinLod.ContainsKey(prefabEntity))
+                {
+                    m_OriginalMinLod[prefabEntity] = geom.m_MinLod;
+                }
+
+                int baseMinLod = m_OriginalMinLod[prefabEntity];
+                int target = baseMinLod;
+
+                if (m_Enabled)
+                {
+                    int delta = entry.deltaMinLod + (m_AggressiveCulling ? m_AggressiveCullingDelta : 0);
+                    target = baseMinLod + delta;
+                }
+
+                if (geom.m_MinLod == target)
+                    continue;
+
+                geom.m_MinLod = target;
+                EntityManager.SetComponentData(prefabEntity, geom);
                 if (!EntityManager.HasComponent<Updated>(prefabEntity))
                 {
                     EntityManager.AddComponent<Updated>(prefabEntity);
-                    m_Log.Info($"...and added Updated");
                 }
-
             }
-            m_Finished = true;
+
+            m_PendingApply = false;
         }
 
+        public void ApplySettings(bool enabled, bool aggressive)
+        {
+            m_Enabled = enabled;
+            m_AggressiveCulling = aggressive;
+            m_PendingApply = true;
+        }
     }
 }

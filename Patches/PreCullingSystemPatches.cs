@@ -7,10 +7,8 @@ using System.Reflection;
 using System.Reflection.Emit;
 using Unity.Entities;
 using Unity.Mathematics;
-using UnityEngine;
-using UnityEngine.Rendering;
 
-namespace OcclusionCulling
+namespace PerformanceTweaks.Patches
 {
     [HarmonyPatch(typeof(PreCullingSystem), "GetCullingQuery")]
     static class Patch_GetCullingQuery
@@ -42,39 +40,39 @@ namespace OcclusionCulling
     //    }
     //}
 
-    // WIP: adjusting LOD distance thresholds
-    [HarmonyPatch(typeof(PreCullingSystem), "OnUpdate")]
-    static class Patch_OnUpdate_Lod
-    {
-        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions, ILGenerator generator)
-        {
-            var m = new CodeMatcher(instructions, generator);
+    // WIP: adjusting LOD distance thresholds throughout entire preculling system
+    //[HarmonyPatch(typeof(PreCullingSystem), "OnUpdate")]
+    //static class Patch_OnUpdate_Lod
+    //{
+    //    static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions, ILGenerator generator)
+    //    {
+    //        var m = new CodeMatcher(instructions, generator);
 
-            var utilsType = Type.GetType("Game.Rendering.RenderingUtils, Game", throwOnError: true);
-            var lodParamsType = Type.GetType("UnityEngine.Rendering.LODParameters, UnityEngine.CoreModule", throwOnError: true);
+    //        var utilsType = Type.GetType("Game.Rendering.RenderingUtils, Game", throwOnError: true);
+    //        var lodParamsType = Type.GetType("UnityEngine.Rendering.LODParameters, UnityEngine.CoreModule", throwOnError: true);
 
-            var calc = utilsType.GetMethod(
-                "CalculateLodParameters",
-                BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic,
-                binder: null,
-                types: new[] { typeof(float), lodParamsType },
-                modifiers: null
-            );
+    //        var calc = utilsType.GetMethod(
+    //            "CalculateLodParameters",
+    //            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic,
+    //            binder: null,
+    //            types: new[] { typeof(float), lodParamsType },
+    //            modifiers: null
+    //        );
 
-            m.MatchStartForward(new CodeMatch(ci => ci.Calls(calc)))
-                .ThrowIfInvalid("CalculateLodParameters call not found")
-                .Advance(1) // AFTER the call (float4 on stack)
-                .InsertAndAdvance(CodeInstruction.Call(typeof(MyModHooks), nameof(MyModHooks.AdjustLodParams)));
+    //        m.MatchStartForward(new CodeMatch(ci => ci.Calls(calc)))
+    //            .ThrowIfInvalid("CalculateLodParameters call not found")
+    //            .Advance(1) // AFTER the call (float4 on stack)
+    //            .InsertAndAdvance(CodeInstruction.Call(typeof(MyModHooks), nameof(MyModHooks.AdjustLodParams)));
 
-            return m.Instructions();
-        }
-    }
+    //        return m.Instructions();
+    //    }
+    //}
 
     public static class MyModHooks
     {
         public static float4 AdjustLodParams(float4 lod)
         {
-            const float bias = 1.25f; // TODO: hook into Setting
+            const float bias = 1.25f;
             return lod * bias;
         }
     }

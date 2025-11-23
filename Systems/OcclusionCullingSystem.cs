@@ -1,29 +1,20 @@
-using Colossal;
-using Colossal.Collections;
 using Colossal.Entities;
 using Colossal.Logging;
 using Colossal.Mathematics;
-using Game.Citizens;
 using Game.Common;
-using Game.Modding.Toolchain.Dependencies;
-using Game.Objects;
 using Game.Prefabs;
 using Game.Rendering;
 using Game.Simulation;
-using System;
+using PerformanceTweaks.Utilities;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Entities;
-using Unity.Entities.UniversalDelegates;
 using Unity.Jobs;
 using Unity.Mathematics;
-using UnityEngine;
-using static OcclusionCulling.SectorOcclusionCulling;
 
-namespace OcclusionCulling
+namespace PerformanceTweaks.Systems
 {
     //[UpdateAfter(typeof(Game.Objects.SearchSystem))]
     [UpdateAfter(typeof(PreCullingSystem))]
@@ -284,7 +275,7 @@ namespace OcclusionCulling
                 s_log.Info($"OnUpdate: dirtied: {m_dirtiedEntities.Count}, cached: {m_cachedCulls.Count}, timeInMs:{stopwatch.ElapsedMilliseconds}, timeJobOnly:{timerForJob}, timeBeforeJob:{timerBeforeJob}");
             }
 
-            if (shouldRenderLines && false)
+            if (shouldRenderLines)
             {
                 //var gs = World.GetOrCreateSystemManaged<GizmosSystem>();
                 //var batcher = gs.GetGizmosBatcher(out var gizmosBatcher);

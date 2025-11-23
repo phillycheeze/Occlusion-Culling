@@ -10,7 +10,7 @@ using Unity.Entities;
 using Unity.Jobs;
 using Unity.Mathematics;
 
-namespace OcclusionCulling
+namespace PerformanceTweaks
 {
     public partial class OcclusionStartupSystem : GameSystemBase
     {

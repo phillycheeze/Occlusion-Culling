@@ -1,12 +1,14 @@
-# Better Culling / FPS Boost
+# Performance Tweaks (Beta)
 
-A WIP mod to remove objects from the game's rendering pipeline if they aren't actually in view to the player.
+This Cities Skylines 2 mod contains various tweaks that increase performance.
 
-## Remaining Tasks
-  * Object Culling: the rectangular bounds encompasses an entire Prefab, but some parts don't take up the whole bounds
-  * Settings: expose settings for setting ray steps, boundary padding, max chunks size, or distance settings
-  * Adjustable LOD distance settings: the vanilla game's distance LOD settings are used to calculate when an object should be distanced-culled AND when to select mesh variant
-	* Instead, allow higher-quality LOD meshes for longer distances but still keep the culling-threshold lower (can increase visual fidelity without lowering performance)
-	* Several assets use unusually low minLod values (i.e. Cargo ship containers prefab) that cause high vertex rendering counts at very large distances
-  * CPU-targeted optimizations:
-	* Tweak cpu culling thresholds in vanilla system
+## GPU-based Adjustements
+
+* **LOD Adjustments**: decrease the lod min distances on many objects in the game. These objects are chosed because they either have LOD thresholds that are too high OR the game did not include additional LOD meshes.
+* **Shadow Patches**: the game currently doesn't use some of your Settings > Graphics > Shadow config when rendering shadow resolutions. This patches that and also allows you to increase shadow performance beyond the allowed settings.
+* **Terrain Culling**: a system that removes objects from the rendering pipeline if they are obstructed by terrain. Enabling this increases CPU usage.
+
+## Credits
+* phillycheeze - mod author
+* krzychu124 - feedback, code sharing
+* Also to Necko1996, elGendo87, Honu, and other for helping with alpha testing

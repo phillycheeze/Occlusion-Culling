@@ -1,73 +1,95 @@
 ﻿using Colossal;
 using Colossal.IO.AssetDatabase;
-using Game.Input;
 using Game.Modding;
 using Game.Settings;
-using Game.UI;
 using System.Collections.Generic;
+using PerformanceTweaks.Patches;
 
-namespace OcclusionCulling
+namespace PerformanceTweaks
 {
-    [FileLocation("OcclusionCullingMod")]
-    [SettingsUIGroupOrder(kMainGroup, kKeybindingGroup, kAdvGroup)]
-    [SettingsUIShowGroupName(kMainGroup)]
+	[FileLocation("ModsSettings/PerformanceTweaks/PerformanceTweaks")]
+	[SettingsUIGroupOrder(kGpuGroup)]
+	[SettingsUIShowGroupName(kGpuGroup)]
     public class Setting : ModSetting
     {
         public const string kSection = "Main";
-        //public const string kAdvSection = "Advanced";
 
-        public const string kMainGroup = "Main";
-        public const string kAdvGroup = "Advanced";
-
-        public const string kKeybindingGroup = "KeyBinding";
+		public const string kGpuGroup = "GPU";
 
         public Setting(IMod mod) : base(mod)
         {
 
         }
 
-        [SettingsUIKeyboardBinding(BindingKeyboard.M, Mod.kButtonActionName, ctrl: true)]
-        [SettingsUISection(kSection, kKeybindingGroup)]
-        public ProxyBinding KeyboardBinding { get; set; }
+		private bool m_EnableTerrainCulling;
 
-        [SettingsUISection(kSection, kKeybindingGroup)]
-        public bool ResetBindings
-        {
-            set
-            {
-                Mod.log.Info("Reset key bindings");
-                ResetKeyBindings();
-            }
-        }
+		[SettingsUISection(kSection, kGpuGroup)]
+		public bool EnableTerrainCulling
+		{
+			get => m_EnableTerrainCulling;
+			set
+			{
+				m_EnableTerrainCulling = value;
+				if (Mod.m_OcclusionSystem != null)
+				{
+					Mod.m_OcclusionSystem.Enabled = value;
+				}
+			}
+		}
 
-        [SettingsUISlider(min = 200, max = 3000, step = 10, scalarMultiplier = 1, unit = Unit.kInteger)]
-        [SettingsUISection(kSection, kMainGroup)]
-        public int MaxDistanceSlider { get; set; }
+		private bool m_EnableLodAdjustmentSystem;
 
-        [SettingsUISlider(min = 24, max = 196, step = 2, scalarMultiplier = 1, unit = Unit.kInteger)]
-        [SettingsUISection(kSection, kAdvGroup)]
-        public int SectorsSlider { get; set; }
+		[SettingsUISection(kSection, kGpuGroup)]
+		public bool EnableLodAdjustmentSystem
+		{
+			get => m_EnableLodAdjustmentSystem;
+			set
+			{
+				m_EnableLodAdjustmentSystem = value;
+				if (Mod.m_LodAdjustmentSystem != null)
+				{
+					Mod.m_LodAdjustmentSystem.ApplySettings(m_EnableLodAdjustmentSystem, m_AggressiveCulling);
+				}
+			}
+		}
 
-        [SettingsUISlider(min = 24, max = 256, step = 2, scalarMultiplier = 1, unit = Unit.kInteger)]
-        [SettingsUISection(kSection, kAdvGroup)]
-        public int BinsSlider { get; set; }
+		private bool m_AggressiveCulling;
 
-        [SettingsUISlider(min = 100, max = 2500, step = 10, scalarMultiplier = 1, unit = Unit.kInteger)]
-        [SettingsUISection(kSection, kAdvGroup)]
-        public int ObjectOcclusionDistanceSlider { get; set; }
+		[SettingsUISection(kSection, kGpuGroup)]
+		public bool AggressiveCulling
+		{
+			get => m_AggressiveCulling;
+			set
+			{
+				m_AggressiveCulling = value;
+				if (Mod.m_LodAdjustmentSystem != null)
+					Mod.m_LodAdjustmentSystem.ApplySettings(m_EnableLodAdjustmentSystem, m_AggressiveCulling);
+			}
+		}
 
-        [SettingsUISlider(min = 50, max = 2500, step = 10, scalarMultiplier = 1, unit = Unit.kInteger)]
-        [SettingsUISection(kSection, kAdvGroup)]
-        public int BatchSizeSlider { get; set; }
+		[SettingsUISection(kSection, kGpuGroup)]
+		public bool EnableShadowCullingPatch
+		{
+			get => Patch_GetShadowCullingData.Enabled;
+			set => Patch_GetShadowCullingData.Enabled = value;
+		}
+
+		[SettingsUISection(kSection, kGpuGroup)]
+		public bool DoubleShadowCullingExtents
+		{
+			get => Patch_GetShadowCullingData.DoubleYZ;
+			set => Patch_GetShadowCullingData.DoubleYZ = value;
+		}
 
 
         public override void SetDefaults()
         {
-            this.MaxDistanceSlider = 2000;
-            this.SectorsSlider = 96;
-            this.BinsSlider = 156;
-            this.ObjectOcclusionDistanceSlider = 400;
-            this.BatchSizeSlider = 1000;
+			this.EnableTerrainCulling = true;
+			m_EnableLodAdjustmentSystem = true;
+			m_AggressiveCulling = false;
+			// Defer applying to Mod.OnLoad where system exists
+			this.EnableShadowCullingPatch = true;
+			this.DoubleShadowCullingExtents = false;
         }
         
     }
@@ -83,20 +105,25 @@ namespace OcclusionCulling
         {
             return new Dictionary<string, string>
             {
-                { m_Setting.GetSettingsLocaleID(), "Better Culling (Alpha)" },
+                { m_Setting.GetSettingsLocaleID(), "Performance Tweaks" },
 
                 { m_Setting.GetOptionTabLocaleID(Setting.kSection), "Main" },
-                { m_Setting.GetOptionGroupLocaleID(Setting.kKeybindingGroup), "Key bindings" },
-                { m_Setting.GetOptionLabelLocaleID(nameof(Setting.KeyboardBinding)), "Enable/Disable system" },
-                { m_Setting.GetOptionDescLocaleID(nameof(Setting.KeyboardBinding)), $"Keyboard binding of Button input action" },
+				{ m_Setting.GetOptionGroupLocaleID(Setting.kGpuGroup), "GPU" },
 
-                { m_Setting.GetOptionLabelLocaleID(nameof(Setting.ResetBindings)), "Reset key bindings" },
-                { m_Setting.GetOptionDescLocaleID(nameof(Setting.ResetBindings)), $"Reset all key bindings of the mod" },
+				{ m_Setting.GetOptionLabelLocaleID(nameof(Setting.EnableTerrainCulling)), "Enable Terrain Culling" },
+				{ m_Setting.GetOptionDescLocaleID(nameof(Setting.EnableTerrainCulling)), "Will remove objects from rendering pipeline if visibility is blocked by terrain. Increases CPU usage." },
 
-                { m_Setting.GetBindingKeyLocaleID(Mod.kButtonActionName), "Button key" },
-                //{ m_Setting.GetOptionTabLocaleID(Setting.kAdvSection), "Advanced" },
+				{ m_Setting.GetOptionLabelLocaleID(nameof(Setting.EnableLodAdjustmentSystem)), "Enable LOD Adjustment System" },
+				{ m_Setting.GetOptionDescLocaleID(nameof(Setting.EnableLodAdjustmentSystem)), "Applies LOD distance adjustements based on manually-reviewed objects." },
 
-                //{ m_Setting.GetBindingMapLocaleID(), "Mod settings sample" },
+				{ m_Setting.GetOptionLabelLocaleID(nameof(Setting.AggressiveCulling)), "Aggressive culling (extra LOD bias)" },
+				{ m_Setting.GetOptionDescLocaleID(nameof(Setting.AggressiveCulling)), "Increase minimum LOD by an additional bias for even more performance." },
+
+				{ m_Setting.GetOptionLabelLocaleID(nameof(Setting.EnableShadowCullingPatch)), "Enable Shadow Culling Patch" },
+				{ m_Setting.GetOptionDescLocaleID(nameof(Setting.EnableShadowCullingPatch)), "Toggle an additional shadow rendering bug fix to properly respect your Settings > Graphics > Shadows selection." },
+
+				{ m_Setting.GetOptionLabelLocaleID(nameof(Setting.DoubleShadowCullingExtents)), "Increased Shadow Threshold" },
+				{ m_Setting.GetOptionDescLocaleID(nameof(Setting.DoubleShadowCullingExtents)), "Multiplies the threshold for shadow sizes that can pass through the rendering pipeline for more performance." },
             };
         }
 

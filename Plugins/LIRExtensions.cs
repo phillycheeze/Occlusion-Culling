@@ -1,6 +1,6 @@
 ﻿using UnityEngine;
 
-namespace OcclusionCulling.Plugins
+namespace PerformanceTweaks.Plugins
 {
 
     // utility functions, extending Vector2.

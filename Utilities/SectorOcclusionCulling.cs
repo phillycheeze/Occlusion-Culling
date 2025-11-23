@@ -1,24 +1,17 @@
-using Colossal;
 using Colossal.Collections;
 using Colossal.Mathematics;
 using Game.Common;
-using Game.Objects;
 using Game.Prefabs;
-using Game.Rendering;
 using Game.Simulation;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Entities;
 using Unity.Jobs;
 using Unity.Mathematics;
-using UnityEngine;
-using UnityEngine.Profiling;
-using UnityEngine.Rendering;
 
-namespace OcclusionCulling
+namespace PerformanceTweaks.Utilities
 {
     /// <summary>
     /// Implements a sector-based radial height map occlusion culling.

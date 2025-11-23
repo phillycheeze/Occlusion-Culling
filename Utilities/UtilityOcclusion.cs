@@ -4,15 +4,12 @@ using Colossal.Collections;
 using Unity.Mathematics;
 using Game.Common;
 using Colossal.Mathematics;
-using Colossal.Logging;
 using Game.Objects;
 using Game.Prefabs;
-using OcclusionCulling.Utilities;
 using System.Collections.Generic;
-using HarmonyLib;
 using Unity.Burst;
 
-namespace OcclusionCulling
+namespace PerformanceTweaks.Utilities
 {
     public static class OcclusionUtilities
     {
