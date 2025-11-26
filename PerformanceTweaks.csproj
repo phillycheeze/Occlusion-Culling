@@ -113,10 +113,14 @@
 	</ItemGroup>
 
 	<ItemGroup>
-	  <Reference Update="C:\Program Files %28x86%29\Steam\steamapps\common\Cities Skylines II\Cities2_Data\Managed\mscorlib.dll">
+	  <Reference Update="$(ManagedPath)\mscorlib.dll">
 	    <Aliases>global, mscorlib</Aliases>
 	  </Reference>
 	</ItemGroup>
+
+	<Target Name="BuildUI" AfterTargets="AfterBuild">
+		<Exec Command="npm run build" WorkingDirectory="$(ProjectDir)/UI" />
+	</Target>
 
 </Project>
 
